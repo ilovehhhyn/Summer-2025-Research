@@ -1,0 +1,103 @@
+# dual_eyetracking_server.py
+# Server script to coordinate gaze data between two eye tracking clients
+
+import socket
+import threading
+import json
+import time
+from queue import Queue, Empty
+
+class GazeServer:
+    def __init__(self, host='0.0.0.0', port=12345):
+        self.host = host
+        self.port = port
+        self.clients = {}  # Store client connections
+        self.gaze_data = {}  # Store latest gaze data for each client
+        self.running = False
+        
+    def start_server(self):
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(2)  # Only expecting 2 clients
+        self.running = True
+        
+        print(f"Gaze server started on {self.host}:{self.port}")
+        print("Waiting for 2 eye tracking clients to connect...")
+        
+        # Accept connections from both clients
+        while len(self.clients) < 2 and self.running:
+            try:
+                client_socket, address = self.server_socket.accept()
+                client_id = f"client_{len(self.clients) + 1}"
+                self.clients[client_id] = client_socket
+                self.gaze_data[client_id] = {'x': 0, 'y': 0, 'valid': False}
+                
+                print(f"Client {client_id} connected from {address}")
+                
+                # Start a thread to handle this client
+                client_thread = threading.Thread(
+                    target=self.handle_client, 
+                    args=(client_socket, client_id)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+                
+            except Exception as e:
+                print(f"Error accepting connection: {e}")
+                
+        if len(self.clients) == 2:
+            print("Both clients connected! Starting gaze data relay...")
+            
+    def handle_client(self, client_socket, client_id):
+        """Handle incoming gaze data from a client and relay to the other client"""
+        try:
+            while self.running:
+                # Receive gaze data from this client
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                    
+                try:
+                    gaze_info = json.loads(data.decode())
+                    self.gaze_data[client_id] = gaze_info
+                    
+                    # Relay this gaze data to the other client
+                    other_client_id = 'client_1' if client_id == 'client_2' else 'client_2'
+                    if other_client_id in self.clients:
+                        other_socket = self.clients[other_client_id]
+                        try:
+                            # Send the gaze data to the other client
+                            relay_data = json.dumps(gaze_info).encode()
+                            other_socket.send(relay_data + b'\n')
+                        except Exception as e:
+                            print(f"Error relaying data to {other_client_id}: {e}")
+                            
+                except json.JSONDecodeError:
+                    print(f"Invalid JSON from {client_id}")
+                    
+        except Exception as e:
+            print(f"Error handling {client_id}: {e}")
+        finally:
+            print(f"{client_id} disconnected")
+            if client_id in self.clients:
+                del self.clients[client_id]
+            client_socket.close()
+            
+    def stop_server(self):
+        self.running = False
+        for client_socket in self.clients.values():
+            client_socket.close()
+        self.server_socket.close()
+        print("Server stopped")
+
+if __name__ == "__main__":
+    server = GazeServer()
+    try:
+        server.start_server()
+        # Keep server running
+        while server.running and len(server.clients) > 0:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+        server.stop_server()

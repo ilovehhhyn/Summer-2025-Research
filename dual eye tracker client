@@ -1,0 +1,713 @@
+from __future__ import division
+from __future__ import print_function
+
+import pylink
+import os
+import platform
+import random
+import time
+import sys
+from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+from psychopy import visual, core, event, monitors, gui
+from PIL import Image, ImageDraw
+from string import ascii_letters, digits
+
+# Switch to the script folder
+script_path = os.path.dirname(sys.argv[0])
+if len(script_path) != 0:
+    os.chdir(script_path)
+
+print("EyeLink Experiment Starting...")
+print(f"Script running from: {os.getcwd()}")
+
+# Show only critical log message in the PsychoPy console
+from psychopy import logging
+logging.console.setLevel(logging.CRITICAL)
+
+# Configuration parameters - adjust these as needed
+use_retina = False
+dummy_mode = False  # Set to True for testing without EyeLink hardware
+full_screen = True  # Set to False for easier debugging
+
+# Store the parameters of all trials in a list, [condition, image]
+trials = [
+    ['cond_1', 'img_1.jpg'],
+    ['cond_2', 'img_2.jpg'],
+]
+
+# Global variables to track objects
+win = None
+el_tracker = None
+genv = None
+
+def setup_required_files():
+    """Create necessary directories and default images if they don't exist"""
+    
+    # Create images directory
+    if not os.path.exists('images'):
+        os.makedirs('images')
+        print("Created 'images' directory")
+    
+    # Create default stimulus images if they don't exist
+    required_images = ['img_1.jpg', 'img_2.jpg']
+    
+    for img_file in required_images:
+        img_path = os.path.join('images', img_file)
+        if not os.path.exists(img_path):
+            print(f"Creating default image: {img_file}")
+            # Create a simple colored rectangle as default stimulus
+            img = Image.new('RGB', (800, 600), color='lightblue' if '1' in img_file else 'lightcoral')
+            draw = ImageDraw.Draw(img)
+            # Add some text to distinguish the images
+            text = f"Stimulus {img_file.split('_')[1].split('.')[0]}"
+            # Use a more reliable text positioning method
+            bbox = draw.textbbox((0, 0), text)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            x = (800 - text_width) // 2
+            y = (600 - text_height) // 2
+            draw.text((x, y), text, fill='black')
+            img.save(img_path)
+    
+    # Create default fixation target for calibration
+    fix_target_path = os.path.join('images', 'fixTarget.bmp')
+    if not os.path.exists(fix_target_path):
+        print("Creating default fixation target")
+        # Create a simple fixation cross
+        img = Image.new('RGB', (50, 50), color='white')
+        draw = ImageDraw.Draw(img)
+        # Draw cross
+        draw.line([(25, 10), (25, 40)], fill='black', width=3)
+        draw.line([(10, 25), (40, 25)], fill='black', width=3)
+        img.save(fix_target_path)
+    
+    print("File setup complete!")
+
+# Setup files before continuing
+setup_required_files()
+
+# Set up EDF data file name and local data folder
+edf_fname = 'TEST'
+
+def get_valid_edf_filename():
+    """Get a valid EDF filename from user with improved error handling"""
+    
+    dlg_title = 'Enter EDF File Name'
+    dlg_prompt = 'Please enter a file name with 8 or fewer characters\n' + \
+                 '[letters, numbers, and underscore only].'
+    
+    max_attempts = 5
+    attempt = 0
+    
+    while attempt < max_attempts:
+        dlg = gui.Dlg(dlg_title)
+        dlg.addText(dlg_prompt)
+        dlg.addField('File Name:', edf_fname)
+        
+        # Show dialog and wait for OK or Cancel
+        ok_data = dlg.show()
+        
+        if not dlg.OK:  # User cancelled
+            print('User cancelled filename entry')
+            core.quit()
+            sys.exit()
+        
+        # Get the string entered by the experimenter
+        tmp_str = dlg.data[0]
+        # Strip trailing characters, ignore the ".edf" extension
+        candidate_fname = tmp_str.rstrip().split('.')[0]
+        
+        # Validate filename
+        allowed_char = ascii_letters + digits + '_'
+        
+        if not candidate_fname:  # Empty filename
+            dlg_prompt = 'ERROR: Filename cannot be empty!\n' + dlg_prompt
+        elif not all([c in allowed_char for c in candidate_fname]):
+            dlg_prompt = 'ERROR: Invalid characters in filename!\nUse only letters, numbers, and underscore.\n' + \
+                        'Please enter a file name with 8 or fewer characters\n[letters, numbers, and underscore only].'
+        elif len(candidate_fname) > 8:
+            dlg_prompt = 'ERROR: Filename too long (max 8 characters)!\n' + \
+                        'Please enter a file name with 8 or fewer characters\n[letters, numbers, and underscore only].'
+        else:
+            print(f'Valid EDF filename: {candidate_fname}')
+            return candidate_fname
+        
+        attempt += 1
+    
+    # If we get here, user failed too many times, use default
+    print(f'Too many invalid attempts, using default filename: {edf_fname}')
+    return edf_fname
+
+# Get valid filename
+edf_fname = get_valid_edf_filename()
+
+# Set up results folder structure
+results_folder = 'results'
+if not os.path.exists(results_folder):
+    os.makedirs(results_folder)
+
+# Create session-specific folder
+time_str = time.strftime("_%Y_%m_%d_%H_%M", time.localtime())
+session_identifier = edf_fname + time_str
+session_folder = os.path.join(results_folder, session_identifier)
+if not os.path.exists(session_folder):
+    os.makedirs(session_folder)
+
+print(f"Session data will be saved to: {session_folder}")
+
+def connect_to_eyelink():
+    """Connect to EyeLink with comprehensive error handling"""
+    
+    if dummy_mode:
+        print("Running in DUMMY MODE - no EyeLink hardware required")
+        return pylink.EyeLink(None)
+    else:
+        print("Attempting to connect to EyeLink Host PC...")
+        try:
+            el_tracker = pylink.EyeLink("100.1.1.1")
+            print("Successfully connected to EyeLink!")
+            return el_tracker
+        except RuntimeError as error:
+            print(f'ERROR connecting to EyeLink: {error}')
+            print("Possible solutions:")
+            print("1. Check EyeLink Host PC is running")
+            print("2. Verify network connection")
+            print("3. Check IP address (default: 100.1.1.1)")
+            print("4. Set dummy_mode = True for testing without hardware")
+            
+            # Offer to continue in dummy mode
+            dlg = gui.Dlg("EyeLink Connection Failed")
+            dlg.addText("Failed to connect to EyeLink. Continue in Dummy Mode?")
+            if dlg.show():
+                print("Continuing in Dummy Mode...")
+                return pylink.EyeLink(None)
+            else:
+                core.quit()
+                sys.exit()
+
+# Connect to EyeLink
+el_tracker = connect_to_eyelink()
+
+def open_edf_file(el_tracker, edf_fname):
+    """Open EDF file with proper error handling"""
+    
+    edf_file = edf_fname + ".EDF"
+    try:
+        el_tracker.openDataFile(edf_file)
+        print(f"Successfully opened EDF file: {edf_file}")
+        return edf_file
+    except RuntimeError as err:
+        print(f'ERROR opening EDF file: {err}')
+        # Close connection if we have one
+        if el_tracker.isConnected():
+            el_tracker.close()
+        core.quit()
+        sys.exit()
+
+# Open EDF file
+edf_file = open_edf_file(el_tracker, edf_fname)
+
+# Add header to EDF file
+preamble_text = 'RECORDED BY %s' % os.path.basename(__file__)
+el_tracker.sendCommand("add_file_preamble_text '%s'" % preamble_text)
+
+# Configure the tracker
+el_tracker.setOfflineMode()
+
+# Get EyeLink version
+eyelink_ver = 0
+if not dummy_mode:
+    try:
+        vstr = el_tracker.getTrackerVersionString()
+        eyelink_ver = int(vstr.split()[-1].split('.')[0])
+        print('Running experiment on %s, version %d' % (vstr, eyelink_ver))
+    except:
+        print("Could not determine EyeLink version, using default settings")
+
+# Configure data recording
+file_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT'
+link_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,BUTTON,FIXUPDATE,INPUT'
+
+if eyelink_ver > 3:
+    file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT'
+    link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,HTARGET,STATUS,INPUT'
+else:
+    file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,GAZERES,BUTTON,STATUS,INPUT'
+    link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,STATUS,INPUT'
+
+el_tracker.sendCommand("file_event_filter = %s" % file_event_flags)
+el_tracker.sendCommand("file_sample_data = %s" % file_sample_flags)
+el_tracker.sendCommand("link_event_filter = %s" % link_event_flags)
+el_tracker.sendCommand("link_sample_data = %s" % link_sample_flags)
+
+# Set calibration type and gamepad button
+el_tracker.sendCommand("calibration_type = HV9")
+el_tracker.sendCommand("button_function 5 'accept_target_fixation'")
+
+def setup_psychopy_window():
+    """Set up PsychoPy window with proper error handling"""
+    
+    try:
+        # Monitor setup - adjust these values for your setup
+        mon = monitors.Monitor('myMonitor', width=53.0, distance=70.0)
+        
+        win = visual.Window(fullscr=full_screen,
+                           monitor=mon,
+                           winType='pyglet',
+                           units='pix',
+                           allowGUI=not full_screen)  # Allow GUI in windowed mode
+        
+        print(f"PsychoPy window created successfully")
+        print(f"Window size: {win.size}")
+        return win
+        
+    except Exception as e:
+        print(f"ERROR creating PsychoPy window: {e}")
+        print("Try setting full_screen = False for debugging")
+        core.quit()
+        sys.exit()
+
+# Create PsychoPy window
+win = setup_psychopy_window()
+
+# Get screen dimensions
+scn_width, scn_height = win.size
+print(f"Screen resolution: {scn_width} x {scn_height}")
+
+# Handle retina display resolution
+if 'Darwin' in platform.system():
+    if use_retina:
+        scn_width = int(scn_width/2.0)
+        scn_height = int(scn_height/2.0)
+        print(f"Adjusted for retina display: {scn_width} x {scn_height}")
+
+# Configure EyeLink screen coordinates
+el_coords = "screen_pixel_coords = 0 0 %d %d" % (scn_width - 1, scn_height - 1)
+el_tracker.sendCommand(el_coords)
+
+dv_coords = "DISPLAY_COORDS  0 0 %d %d" % (scn_width - 1, scn_height - 1)
+el_tracker.sendMessage(dv_coords)
+
+# Configure graphics environment for calibration
+genv = EyeLinkCoreGraphicsPsychoPy(el_tracker, win)
+print(f"CoreGraphics version: {genv}")
+
+# Set calibration colors
+foreground_color = (-1, -1, -1)  # black
+background_color = win.color
+genv.setCalibrationColors(foreground_color, background_color)
+
+def setup_calibration_target(genv):
+    """Set up calibration target with fallback options"""
+    
+    fix_target_path = os.path.join('images', 'fixTarget.bmp')
+    
+    try:
+        if os.path.exists(fix_target_path):
+            genv.setTargetType('picture')
+            genv.setPictureTarget(fix_target_path)
+            print("Using picture calibration target")
+        else:
+            raise FileNotFoundError("Picture target not found")
+    except Exception as e:
+        print(f"Could not set picture target ({e}), using circle target")
+        genv.setTargetType('circle')
+        genv.setTargetSize(24)
+
+# Setup calibration target
+setup_calibration_target(genv)
+
+# Set calibration sounds (quiet for lab environment)
+genv.setCalibrationSounds('', '', '')
+
+# Handle retina display for calibration
+if use_retina:
+    genv.fixMacRetinaDisplay()
+
+# Initialize graphics
+pylink.openGraphicsEx(genv)
+
+def clear_screen(win):
+    """Clear the PsychoPy window safely"""
+    try:
+        # Get background color properly
+        if hasattr(genv, 'getBackgroundColor'):
+            win.fillColor = genv.getBackgroundColor()
+        win.flip()
+    except Exception as e:
+        print(f"Warning: Could not clear screen - {e}")
+
+def show_msg(win, text, wait_for_keypress=True):
+    """Show task instructions with error handling"""
+    try:
+        # Get foreground color properly
+        text_color = 'black'
+        if hasattr(genv, 'getForegroundColor'):
+            text_color = genv.getForegroundColor()
+            
+        msg = visual.TextStim(win, text,
+                              color=text_color,
+                              wrapWidth=scn_width/2)
+        clear_screen(win)
+        msg.draw()
+        win.flip()
+
+        if wait_for_keypress:
+            print("Waiting for keypress...")
+            event.waitKeys()
+            clear_screen(win)
+    except Exception as e:
+        print(f"Error showing message: {e}")
+
+def terminate_task():
+    """Enhanced task termination with comprehensive cleanup"""
+    
+    print("Terminating task...")
+    
+    # Use global reference to tracker
+    global el_tracker
+    
+    if el_tracker and el_tracker.isConnected():
+        # Stop recording if still active
+        try:
+            error = el_tracker.isRecording()
+            if error == pylink.TRIAL_OK:
+                abort_trial()
+        except:
+            pass
+
+        # Put tracker offline
+        try:
+            el_tracker.setOfflineMode()
+            el_tracker.sendCommand('clear_screen 0')
+            pylink.msecDelay(500)
+        except:
+            pass
+
+        # Close EDF file
+        try:
+            el_tracker.closeDataFile()
+        except:
+            print("Warning: Could not close EDF file properly")
+
+        # Download EDF file
+        if not dummy_mode:
+            try:
+                msg = 'EDF data is transferring from EyeLink Host PC...'
+                show_msg(win, msg, wait_for_keypress=False)
+                
+                local_edf = os.path.join(session_folder, session_identifier + '.EDF')
+                el_tracker.receiveDataFile(edf_file, local_edf)
+                print(f"EDF file downloaded to: {local_edf}")
+            except RuntimeError as error:
+                print(f'ERROR downloading EDF file: {error}')
+
+        # Close tracker connection
+        try:
+            el_tracker.close()
+        except:
+            pass
+
+    # Close PsychoPy window
+    if win:
+        try:
+            win.close()
+        except:
+            pass
+
+    print("Task terminated successfully")
+    core.quit()
+    sys.exit()
+
+def abort_trial():
+    """Enhanced trial abortion with error handling"""
+    
+    global el_tracker
+    
+    # Stop recording safely
+    try:
+        if el_tracker and el_tracker.isRecording():
+            pylink.pumpDelay(100)
+            el_tracker.stopRecording()
+    except:
+        pass
+
+    # Clear screen safely
+    try:
+        clear_screen(win)
+        bgcolor_RGB = (116, 116, 116)
+        if el_tracker:
+            el_tracker.sendMessage('!V CLEAR %d %d %d' % bgcolor_RGB)
+            el_tracker.sendMessage('TRIAL_RESULT %d' % pylink.TRIAL_ERROR)
+    except:
+        pass
+
+    return pylink.TRIAL_ERROR
+
+def load_stimulus_image(pic_filename):
+    """Load stimulus image with comprehensive error handling"""
+    
+    img_path = os.path.join('images', pic_filename)
+    
+    try:
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"Image file not found: {img_path}")
+        
+        img = visual.ImageStim(win,
+                              image=img_path,
+                              units='pix')  # Specify units explicitly
+        return img
+    except Exception as e:
+        print(f"ERROR loading image {pic_filename}: {e}")
+        # Create a fallback colored rectangle
+        print("Using fallback colored rectangle")
+        color = 'lightblue' if '1' in pic_filename else 'lightcoral'
+        return visual.Rect(win, width=scn_width, height=scn_height, fillColor=color)
+
+def run_trial(trial_pars, trial_index):
+    """Enhanced trial function with comprehensive error handling"""
+    
+    print(f"Running trial {trial_index}: {trial_pars}")
+    
+    # Unpack trial parameters
+    cond, pic = trial_pars
+
+    # Load stimulus with error handling
+    img = load_stimulus_image(pic)
+
+    global el_tracker
+
+    try:
+        # Put tracker offline
+        if el_tracker:
+            el_tracker.setOfflineMode()
+            el_tracker.sendCommand('clear_screen 0')
+
+        # Enhanced backdrop image handling
+        try:
+            # Try to load and send backdrop image
+            im_path = os.path.join('images', pic)
+            if os.path.exists(im_path) and el_tracker:
+                im = Image.open(im_path)
+                im = im.resize((scn_width, scn_height))
+                img_pixels = im.load()
+                pixels = [[img_pixels[i, j] for i in range(scn_width)]
+                         for j in range(scn_height)]
+                el_tracker.bitmapBackdrop(scn_width, scn_height, pixels,
+                                         0, 0, scn_width, scn_height,
+                                         0, 0, pylink.BX_MAXCONTRAST)
+            else:
+                print(f"Warning: Could not load backdrop image {pic}")
+        except Exception as e:
+            print(f"Warning: Could not set backdrop image - {e}")
+
+        # Draw interest area on Host screen
+        try:
+            if el_tracker:
+                left = int(scn_width/2.0) - 60
+                top = int(scn_height/2.0) - 60
+                right = int(scn_width/2.0) + 60
+                bottom = int(scn_height/2.0) + 60
+                draw_cmd = 'draw_filled_box %d %d %d %d 1' % (left, top, right, bottom)
+                el_tracker.sendCommand(draw_cmd)
+        except:
+            pass
+
+        # Send trial start message
+        if el_tracker:
+            el_tracker.sendMessage('TRIALID %d' % trial_index)
+            status_msg = 'TRIAL number %d' % trial_index
+            el_tracker.sendCommand("record_status_message '%s'" % status_msg)
+
+        # Enhanced drift correction with timeout
+        if not dummy_mode and el_tracker:
+            drift_attempts = 0
+            max_drift_attempts = 3
+            
+            while drift_attempts < max_drift_attempts:
+                if (not el_tracker.isConnected()) or el_tracker.breakPressed():
+                    terminate_task()
+                    return pylink.ABORT_EXPT
+
+                try:
+                    error = el_tracker.doDriftCorrect(int(scn_width/2.0),
+                                                     int(scn_height/2.0), 1, 1)
+                    if error is not pylink.ESC_KEY:
+                        break
+                    drift_attempts += 1
+                except Exception as e:
+                    print(f"Drift correction error: {e}")
+                    drift_attempts += 1
+                    
+            if drift_attempts >= max_drift_attempts:
+                print("Warning: Drift correction failed, continuing anyway")
+
+        # Start recording
+        if el_tracker:
+            el_tracker.setOfflineMode()
+            
+            try:
+                el_tracker.startRecording(1, 1, 1, 1)
+            except RuntimeError as error:
+                print(f"ERROR starting recording: {error}")
+                abort_trial()
+                return pylink.TRIAL_ERROR
+
+            # Wait for recording to stabilize
+            pylink.pumpDelay(100)
+
+        # Show stimulus
+        clear_screen(win)
+        if img:
+            img.draw()
+        win.flip()
+        
+        if el_tracker:
+            el_tracker.sendMessage('image_onset')
+        img_onset_time = core.getTime()
+
+        # Send Data Viewer messages
+        try:
+            if el_tracker:
+                bgcolor_RGB = (116, 116, 116)
+                el_tracker.sendMessage('!V CLEAR %d %d %d' % bgcolor_RGB)
+                
+                bg_image = '../../images/' + pic
+                imgload_msg = '!V IMGLOAD CENTER %s %d %d %d %d' % (bg_image,
+                                                                   int(scn_width/2.0),
+                                                                   int(scn_height/2.0),
+                                                                   int(scn_width),
+                                                                   int(scn_height))
+                el_tracker.sendMessage(imgload_msg)
+                
+                # Define left, top, right, bottom for interest area
+                left = int(scn_width/2.0) - 60
+                top = int(scn_height/2.0) - 60
+                right = int(scn_width/2.0) + 60
+                bottom = int(scn_height/2.0) + 60
+                
+                ia_pars = (1, left, top, right, bottom, 'screen_center')
+                el_tracker.sendMessage('!V IAREA RECTANGLE %d %d %d %d %d %s' % ia_pars)
+        except:
+            pass
+
+        # Wait for response or timeout
+        event.clearEvents()
+        RT = -1
+        get_keypress = False
+        
+        while not get_keypress:
+            # Check for timeout (5 seconds)
+            if core.getTime() - img_onset_time >= 5.0:
+                if el_tracker:
+                    el_tracker.sendMessage('time_out')
+                break
+
+            # Check if still recording
+            if el_tracker:
+                error = el_tracker.isRecording()
+                if error is not pylink.TRIAL_OK:
+                    el_tracker.sendMessage('tracker_disconnected')
+                    abort_trial()
+                    return error
+
+            # Check for key presses
+            for keycode, modifier in event.getKeys(modifiers=True):
+                if keycode == 'space':
+                    if el_tracker:
+                        el_tracker.sendMessage('key_pressed')
+                    RT = int((core.getTime() - img_onset_time) * 1000)
+                    get_keypress = True
+                elif keycode == 'escape':
+                    if el_tracker:
+                        el_tracker.sendMessage('trial_skipped_by_user')
+                    clear_screen(win)
+                    abort_trial()
+                    return pylink.SKIP_TRIAL
+                elif keycode == 'c' and (modifier['ctrl'] is True):
+                    if el_tracker:
+                        el_tracker.sendMessage('terminated_by_user')
+                    terminate_task()
+                    return pylink.ABORT_EXPT
+
+        # Clean up trial
+        clear_screen(win)
+        if el_tracker:
+            el_tracker.sendMessage('blank_screen')
+            el_tracker.sendMessage('!V CLEAR 128 128 128')
+
+            # Stop recording
+            pylink.pumpDelay(100)
+            el_tracker.stopRecording()
+
+            # Record trial variables
+            el_tracker.sendMessage('!V TRIAL_VAR condition %s' % cond)
+            el_tracker.sendMessage('!V TRIAL_VAR image %s' % pic)
+            el_tracker.sendMessage('!V TRIAL_VAR RT %d' % RT)
+            el_tracker.sendMessage('TRIAL_RESULT %d' % pylink.TRIAL_OK)
+        
+        print(f"Trial {trial_index} completed successfully (RT: {RT}ms)")
+        return pylink.TRIAL_OK
+
+    except Exception as e:
+        print(f"ERROR in trial {trial_index}: {e}")
+        abort_trial()
+        return pylink.TRIAL_ERROR
+
+# MAIN EXPERIMENT EXECUTION
+
+# Show task instructions
+task_msg = 'In the task, you may press the SPACEBAR to end a trial\n' + \
+           'Press Ctrl-C if you need to quit the task early\n'
+
+if dummy_mode:
+    task_msg = task_msg + '\nRunning in DUMMY MODE\n\nPress ENTER to start the task'
+else:
+    task_msg = task_msg + '\nPress ENTER twice to calibrate tracker'
+
+show_msg(win, task_msg)
+
+# Enhanced calibration with error handling
+if not dummy_mode and el_tracker:
+    print("Starting tracker setup and calibration...")
+    try:
+        el_tracker.doTrackerSetup()
+        print("Calibration completed successfully")
+    except RuntimeError as err:
+        print(f'Calibration ERROR: {err}')
+        try:
+            el_tracker.exitCalibration()
+        except:
+            pass
+        print("Continuing without calibration...")
+
+# Prepare trial list
+print("Preparing trials...")
+test_list = trials[:] * 2  # Create 4 trials total
+random.shuffle(test_list)
+print(f"Running {len(test_list)} trials: {test_list}")
+
+# Run experimental trials
+print("Starting experimental trials...")
+trial_index = 1
+successful_trials = 0
+
+for trial_pars in test_list:
+    try:
+        result = run_trial(trial_pars, trial_index)
+        if result == pylink.TRIAL_OK:
+            successful_trials += 1
+        elif result == pylink.ABORT_EXPT:
+            break
+        trial_index += 1
+    except KeyboardInterrupt:
+        print("Experiment interrupted by user")
+        break
+    except Exception as e:
+        print(f"Unexpected error in trial {trial_index}: {e}")
+        trial_index += 1
+
+print(f"Experiment completed! Successfully ran {successful_trials}/{len(test_list)} trials")
+
+# Final cleanup and file download
+terminate_task()

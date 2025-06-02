@@ -1,0 +1,621 @@
+"""
+Bidirectional EyeLink Node - Computer A
+Both sends its own gaze data and receives/displays data from Computer B
+Each computer runs this same code with different configuration
+"""
+
+from __future__ import division, print_function
+import pylink
+import os
+import platform
+import random
+import time
+import sys
+import socket
+import threading
+import json
+from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+from psychopy import visual, core, event, monitors, gui
+from PIL import Image, ImageDraw
+from string import ascii_letters, digits
+from collections import deque
+import numpy as np
+
+# =============================================================================
+# CONFIGURATION - MODIFY THESE FOR EACH COMPUTER
+# =============================================================================
+
+# Network Configuration
+MY_IP = '192.168.1.100'  # This computer's IP address
+PARTNER_IP = '192.168.1.101'  # Partner computer's IP address
+SERVER_PORT = 8888
+CLIENT_PORT = 8889
+
+# EyeLink Configuration
+EYELINK_IP = "100.1.1.1"  # EyeLink Host PC IP
+COMPUTER_ID = "A"  # Change to "B" for the other computer
+dummy_mode = False  # Set to True for testing without EyeLink
+
+# Display Configuration
+SHOW_MY_GAZE = True  # Show this computer's gaze cursor
+SHOW_PARTNER_GAZE = True  # Show partner's gaze cursor
+MY_CURSOR_COLOR = 'red'
+PARTNER_CURSOR_COLOR = 'blue'
+CURSOR_SIZE = 20
+TRAIL_LENGTH = 30
+BACKGROUND_COLOR = 'gray'
+
+# =============================================================================
+# GLOBAL VARIABLES
+# =============================================================================
+
+# Network objects
+server_socket = None
+client_socket = None
+partner_connection = None
+
+# EyeLink objects
+el_tracker = None
+win = None
+genv = None
+
+# Data storage
+my_gaze_queue = deque(maxlen=TRAIL_LENGTH)
+partner_gaze_queue = deque(maxlen=TRAIL_LENGTH)
+current_trial_info = None
+experiment_running = False
+data_lock = threading.Lock()
+
+# Experiment data
+trials = [
+    ['cond_1', 'img_1.jpg'],
+    ['cond_2', 'img_2.jpg'],
+]
+
+def setup_required_files():
+    """Create necessary directories and default images"""
+    if not os.path.exists('images'):
+        os.makedirs('images')
+        print("Created 'images' directory")
+    
+    required_images = ['img_1.jpg', 'img_2.jpg']
+    for img_file in required_images:
+        img_path = os.path.join('images', img_file)
+        if not os.path.exists(img_path):
+            print(f"Creating default image: {img_file}")
+            color = 'lightblue' if '1' in img_file else 'lightcoral'
+            img = Image.new('RGB', (800, 600), color=color)
+            draw = ImageDraw.Draw(img)
+            text = f"Stimulus {img_file.split('_')[1].split('.')[0]} - Computer {COMPUTER_ID}"
+            bbox = draw.textbbox((0, 0), text)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            x = (800 - text_width) // 2
+            y = (600 - text_height) // 2
+            draw.text((x, y), text, fill='black')
+            img.save(img_path)
+    
+    # Create fixation target
+    fix_target_path = os.path.join('images', 'fixTarget.bmp')
+    if not os.path.exists(fix_target_path):
+        print("Creating default fixation target")
+        img = Image.new('RGB', (50, 50), color='white')
+        draw = ImageDraw.Draw(img)
+        draw.line([(25, 10), (25, 40)], fill='black', width=3)
+        draw.line([(10, 25), (40, 25)], fill='black', width=3)
+        img.save(img_path)
+
+def setup_network():
+    """Set up both server (to receive) and client (to send) connections"""
+    global server_socket, client_socket, partner_connection
+    
+    success = True
+    
+    # Setup server to receive partner's data
+    try:
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((MY_IP, SERVER_PORT))
+        server_socket.listen(1)
+        print(f"Server listening on {MY_IP}:{SERVER_PORT} for partner connections")
+        
+        # Start thread to accept partner connection
+        def accept_partner():
+            global partner_connection
+            try:
+                partner_connection, addr = server_socket.accept()
+                print(f"Partner connected from {addr}")
+            except Exception as e:
+                print(f"Error accepting partner connection: {e}")
+        
+        accept_thread = threading.Thread(target=accept_partner, daemon=True)
+        accept_thread.start()
+        
+    except Exception as e:
+        print(f"Error setting up server: {e}")
+        success = False
+    
+    # Setup client to send data to partner
+    def connect_to_partner():
+        global client_socket
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            try:
+                print(f"Attempting to connect to partner {PARTNER_IP}:{SERVER_PORT} (attempt {attempt + 1})")
+                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.connect((PARTNER_IP, SERVER_PORT))
+                print("Connected to partner successfully!")
+                return True
+            except Exception as e:
+                print(f"Connection attempt {attempt + 1} failed: {e}")
+                if client_socket:
+                    client_socket.close()
+                    client_socket = None
+                time.sleep(2)
+        return False
+    
+    # Start connection attempt in background
+    connect_thread = threading.Thread(target=connect_to_partner, daemon=True)
+    connect_thread.start()
+    
+    return success
+
+def send_data_to_partner(data_type, data):
+    """Send data to partner computer"""
+    global client_socket
+    
+    if not client_socket:
+        return False
+    
+    try:
+        message = {
+            'type': data_type,
+            'computer_id': COMPUTER_ID,
+            'timestamp': time.time(),
+            'data': data
+        }
+        
+        json_message = json.dumps(message) + '\n'
+        client_socket.send(json_message.encode('utf-8'))
+        return True
+        
+    except Exception as e:
+        print(f"Error sending data to partner: {e}")
+        client_socket = None
+        return False
+
+def receive_partner_data_thread():
+    """Thread to receive data from partner"""
+    global partner_connection, partner_gaze_queue
+    
+    print("Starting partner data reception thread...")
+    buffer = ""
+    
+    # Wait for partner connection
+    while not partner_connection:
+        time.sleep(0.1)
+    
+    try:
+        while partner_connection:
+            data = partner_connection.recv(1024).decode('utf-8')
+            if not data:
+                break
+            
+            buffer += data
+            
+            while '\n' in buffer:
+                line, buffer = buffer.split('\n', 1)
+                if line.strip():
+                    try:
+                        message = json.loads(line.strip())
+                        process_partner_message(message)
+                    except json.JSONDecodeError as e:
+                        print(f"Error decoding partner JSON: {e}")
+                        
+    except Exception as e:
+        print(f"Error in partner data reception: {e}")
+    
+    print("Partner data reception thread ended")
+
+def process_partner_message(message):
+    """Process messages received from partner"""
+    global partner_gaze_queue
+    
+    msg_type = message.get('type')
+    partner_id = message.get('computer_id', 'Unknown')
+    
+    if msg_type == 'gaze_data':
+        with data_lock:
+            gaze_data = message.get('data', {})
+            partner_gaze_queue.append(gaze_data)
+    
+    elif msg_type == 'trial_event':
+        event_data = message.get('data', {})
+        print(f"Partner {partner_id} trial event: {event_data}")
+    
+    elif msg_type == 'status':
+        status_data = message.get('data', {})
+        print(f"Partner {partner_id} status: {status_data}")
+
+def setup_eyelink():
+    """Set up EyeLink connection and configuration"""
+    global el_tracker
+    
+    if dummy_mode:
+        print("Running in DUMMY MODE - no EyeLink hardware required")
+        el_tracker = pylink.EyeLink(None)
+    else:
+        try:
+            print(f"Connecting to EyeLink at {EYELINK_IP}...")
+            el_tracker = pylink.EyeLink(EYELINK_IP)
+            print("Successfully connected to EyeLink!")
+        except RuntimeError as error:
+            print(f'ERROR connecting to EyeLink: {error}')
+            return False
+    
+    # Open EDF file
+    edf_fname = f"COMP_{COMPUTER_ID}_TEST"
+    edf_file = edf_fname + ".EDF"
+    
+    try:
+        el_tracker.openDataFile(edf_file)
+        print(f"Opened EDF file: {edf_file}")
+    except RuntimeError as err:
+        print(f'ERROR opening EDF file: {err}')
+        return False
+    
+    # Configure tracker
+    el_tracker.setOfflineMode()
+    
+    # Basic configuration
+    file_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT'
+    link_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,BUTTON,FIXUPDATE,INPUT'
+    file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT'
+    link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,HTARGET,STATUS,INPUT'
+    
+    el_tracker.sendCommand("file_event_filter = %s" % file_event_flags)
+    el_tracker.sendCommand("file_sample_data = %s" % file_sample_flags)
+    el_tracker.sendCommand("link_event_filter = %s" % link_event_flags)
+    el_tracker.sendCommand("link_sample_data = %s" % link_sample_flags)
+    el_tracker.sendCommand("calibration_type = HV9")
+    
+    return True
+
+def setup_psychopy():
+    """Set up PsychoPy window and graphics"""
+    global win, genv
+    
+    try:
+        mon = monitors.Monitor('myMonitor', width=53.0, distance=70.0)
+        win = visual.Window(fullscr=True, monitor=mon, winType='pyglet', 
+                          units='pix', color=BACKGROUND_COLOR)
+        
+        scn_width, scn_height = win.size
+        print(f"Screen resolution: {scn_width} x {scn_height}")
+        
+        # Configure EyeLink screen coordinates
+        if el_tracker:
+            el_coords = "screen_pixel_coords = 0 0 %d %d" % (scn_width - 1, scn_height - 1)
+            el_tracker.sendCommand(el_coords)
+            
+            # Set up graphics environment
+            genv = EyeLinkCoreGraphicsPsychoPy(el_tracker, win)
+            pylink.openGraphicsEx(genv)
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error setting up PsychoPy: {e}")
+        return False
+
+def create_display_elements():
+    """Create visual elements for display"""
+    elements = {}
+    
+    # My gaze cursor
+    if SHOW_MY_GAZE:
+        elements['my_cursor'] = visual.Circle(win, radius=CURSOR_SIZE/2,
+                                            fillColor=MY_CURSOR_COLOR,
+                                            lineColor=MY_CURSOR_COLOR, opacity=0.8)
+    
+    # Partner's gaze cursor
+    if SHOW_PARTNER_GAZE:
+        elements['partner_cursor'] = visual.Circle(win, radius=CURSOR_SIZE/2,
+                                                 fillColor=PARTNER_CURSOR_COLOR,
+                                                 lineColor=PARTNER_CURSOR_COLOR, opacity=0.8)
+    
+    # Trail points for both
+    elements['my_trail'] = []
+    elements['partner_trail'] = []
+    
+    for i in range(TRAIL_LENGTH):
+        opacity = (i + 1) / TRAIL_LENGTH * 0.4
+        
+        my_point = visual.Circle(win, radius=CURSOR_SIZE/4,
+                               fillColor=MY_CURSOR_COLOR, opacity=opacity)
+        elements['my_trail'].append(my_point)
+        
+        partner_point = visual.Circle(win, radius=CURSOR_SIZE/4,
+                                     fillColor=PARTNER_CURSOR_COLOR, opacity=opacity)
+        elements['partner_trail'].append(partner_point)
+    
+    # Information displays
+    elements['info_text'] = visual.TextStim(win, text="", 
+                                          pos=(0, win.size[1]/2 - 40),
+                                          color='white', height=25)
+    
+    elements['status_text'] = visual.TextStim(win, text="",
+                                            pos=(0, -win.size[1]/2 + 40),
+                                            color='yellow', height=20)
+    
+    return elements
+
+def my_gaze_capture_thread():
+    """Thread to capture this computer's gaze data"""
+    global el_tracker, my_gaze_queue
+    
+    print("Starting my gaze capture thread...")
+    
+    while el_tracker and experiment_running:
+        try:
+            if el_tracker.isRecording() == pylink.TRIAL_OK:
+                sample = el_tracker.getNewestSample()
+                
+                if sample is not None:
+                    if sample.isLeftSample():
+                        gaze_x, gaze_y = sample.getLeftEye().getGaze()
+                        
+                        if gaze_x != pylink.MISSING_DATA and gaze_y != pylink.MISSING_DATA:
+                            timestamp = time.time()
+                            
+                            # Store locally
+                            with data_lock:
+                                my_gaze_queue.append({
+                                    'x': gaze_x, 'y': gaze_y, 'timestamp': timestamp
+                                })
+                            
+                            # Send to partner
+                            send_data_to_partner('gaze_data', {
+                                'x': gaze_x, 'y': gaze_y, 'timestamp': timestamp
+                            })
+            
+            time.sleep(0.001)  # 1ms delay
+            
+        except Exception as e:
+            print(f"Error in gaze capture: {e}")
+            break
+    
+    print("Gaze capture thread ended")
+
+def update_display(elements):
+    """Update the display with both computers' gaze data"""
+    global my_gaze_queue, partner_gaze_queue, current_trial_info
+    
+    win.clearBuffer()
+    
+    # Update info text
+    info_text = f"Computer {COMPUTER_ID} - Bidirectional EyeLink"
+    if current_trial_info:
+        info_text += f" | Trial: {current_trial_info}"
+    elements['info_text'].text = info_text
+    elements['info_text'].draw()
+    
+    # Update status
+    with data_lock:
+        my_points = len(my_gaze_queue)
+        partner_points = len(partner_gaze_queue)
+    
+    status_text = f"My gaze: {my_points} pts | Partner gaze: {partner_points} pts"
+    if client_socket and partner_connection:
+        status_text += " | Network: Connected"
+    else:
+        status_text += " | Network: Connecting..."
+    
+    elements['status_text'].text = status_text
+    elements['status_text'].draw()
+    
+    # Draw gaze data
+    with data_lock:
+        # Draw my gaze trail and cursor
+        if SHOW_MY_GAZE and my_gaze_queue:
+            for i, gaze_point in enumerate(list(my_gaze_queue)[:-1]):
+                if i < len(elements['my_trail']):
+                    x, y = convert_coordinates(gaze_point['x'], gaze_point['y'])
+                    elements['my_trail'][i].pos = (x, y)
+                    elements['my_trail'][i].draw()
+            
+            # Current position cursor
+            latest_gaze = my_gaze_queue[-1]
+            x, y = convert_coordinates(latest_gaze['x'], latest_gaze['y'])
+            elements['my_cursor'].pos = (x, y)
+            elements['my_cursor'].draw()
+        
+        # Draw partner's gaze trail and cursor
+        if SHOW_PARTNER_GAZE and partner_gaze_queue:
+            for i, gaze_point in enumerate(list(partner_gaze_queue)[:-1]):
+                if i < len(elements['partner_trail']):
+                    x, y = convert_coordinates(gaze_point['x'], gaze_point['y'])
+                    elements['partner_trail'][i].pos = (x, y)
+                    elements['partner_trail'][i].draw()
+            
+            # Partner's current position cursor
+            latest_gaze = partner_gaze_queue[-1]
+            x, y = convert_coordinates(latest_gaze['x'], latest_gaze['y'])
+            elements['partner_cursor'].pos = (x, y)
+            elements['partner_cursor'].draw()
+    
+    win.flip()
+
+def convert_coordinates(gaze_x, gaze_y, source_width=1920, source_height=1080):
+    """Convert gaze coordinates to display coordinates"""
+    client_width, client_height = win.size
+    
+    # Convert to PsychoPy coordinate system (center origin)
+    x = (gaze_x / source_width) * client_width - client_width/2
+    y = client_height/2 - (gaze_y / source_height) * client_height
+    
+    return x, y
+
+def run_experiment():
+    """Main experiment loop"""
+    global experiment_running, current_trial_info
+    
+    print(f"Starting experiment on Computer {COMPUTER_ID}")
+    
+    # Send status to partner
+    send_data_to_partner('status', {'message': 'experiment_starting'})
+    
+    # Calibrate if not in dummy mode
+    if not dummy_mode and el_tracker:
+        try:
+            print("Starting calibration...")
+            el_tracker.doTrackerSetup()
+            print("Calibration completed")
+        except Exception as e:
+            print(f"Calibration error: {e}")
+    
+    # Start threads
+    experiment_running = True
+    
+    gaze_thread = threading.Thread(target=my_gaze_capture_thread, daemon=True)
+    gaze_thread.start()
+    
+    partner_thread = threading.Thread(target=receive_partner_data_thread, daemon=True)
+    partner_thread.start()
+    
+    # Create display elements
+    elements = create_display_elements()
+    
+    # Prepare trials
+    test_list = trials[:] * 2
+    random.shuffle(test_list)
+    
+    print(f"Running {len(test_list)} trials")
+    
+    # Main experiment and display loop
+    clock = core.Clock()
+    trial_index = 0
+    trial_start_time = None
+    trial_duration = 5.0  # 5 seconds per trial
+    
+    try:
+        while trial_index < len(test_list):
+            # Check for quit
+            keys = event.getKeys()
+            if 'escape' in keys:
+                break
+            
+            # Trial management
+            if trial_start_time is None:
+                # Start new trial
+                current_trial_info = f"{trial_index + 1}: {test_list[trial_index]}"
+                print(f"Starting trial: {current_trial_info}")
+                
+                # Start recording
+                if el_tracker:
+                    try:
+                        el_tracker.startRecording(1, 1, 1, 1)
+                        pylink.pumpDelay(100)
+                    except Exception as e:
+                        print(f"Recording error: {e}")
+                
+                trial_start_time = time.time()
+                send_data_to_partner('trial_event', {'trial_start': current_trial_info})
+            
+            elif time.time() - trial_start_time >= trial_duration:
+                # End current trial
+                if el_tracker:
+                    try:
+                        el_tracker.stopRecording()
+                    except Exception as e:
+                        print(f"Stop recording error: {e}")
+                
+                send_data_to_partner('trial_event', {'trial_end': current_trial_info})
+                print(f"Completed trial: {current_trial_info}")
+                
+                trial_index += 1
+                trial_start_time = None
+                time.sleep(1.0)  # Inter-trial interval
+            
+            # Update display
+            update_display(elements)
+            
+            # Control frame rate
+            clock.tick(60)
+            time.sleep(0.001)
+    
+    except KeyboardInterrupt:
+        print("Experiment interrupted")
+    
+    # End experiment
+    experiment_running = False
+    send_data_to_partner('status', {'message': 'experiment_ended'})
+    print("Experiment completed")
+
+def cleanup():
+    """Clean up all resources"""
+    global server_socket, client_socket, partner_connection, el_tracker, win
+    
+    print("Cleaning up resources...")
+    
+    # Close network connections
+    for sock in [client_socket, partner_connection, server_socket]:
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+    
+    # Close EyeLink
+    if el_tracker and el_tracker.isConnected():
+        try:
+            if el_tracker.isRecording():
+                el_tracker.stopRecording()
+            el_tracker.setOfflineMode()
+            el_tracker.closeDataFile()
+            el_tracker.close()
+        except:
+            pass
+    
+    # Close PsychoPy
+    if win:
+        try:
+            win.close()
+        except:
+            pass
+    
+    core.quit()
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+if __name__ == "__main__":
+    print(f"EyeLink Bidirectional Node {COMPUTER_ID} Starting...")
+    print(f"My IP: {MY_IP}, Partner IP: {PARTNER_IP}")
+    
+    try:
+        # Setup everything
+        setup_required_files()
+        
+        if not setup_network():
+            raise Exception("Network setup failed")
+        
+        if not setup_eyelink():
+            raise Exception("EyeLink setup failed")
+        
+        if not setup_psychopy():
+            raise Exception("PsychoPy setup failed")
+        
+        # Wait a moment for network connections
+        print("Waiting for network connections to establish...")
+        time.sleep(3)
+        
+        # Run the experiment
+        run_experiment()
+        
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        cleanup()
+        sys.exit()

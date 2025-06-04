@@ -185,11 +185,12 @@ def start_enhanced_gaze_thread():
         print("No client connection - gaze thread not started")
         return None
 
-# Get Computer A's IP address
+# FIXED: Get Computer A's IP address with correct default for ethernet
 dlg = gui.Dlg(title='Computer B - Network Setup')
 dlg.addText('Enter Computer A\'s IP address:')
-dlg.addField('Computer A IP:', '192.168.1.100')
+dlg.addField('Computer A IP:', '100.1.1.10')  # CHANGED: Correct ethernet IP default
 dlg.addText('(Check Computer A\'s console for the correct IP)')
+dlg.addText('(Should be 100.1.1.10 for ethernet connection)')  # ADDED: Helpful hint
 dlg_data = dlg.show()
 
 if dlg.OK:
@@ -200,15 +201,15 @@ else:
     core.quit()
     sys.exit()
 
-# Connect to Computer A (Server)
+# Connect to Computer A (Server) with enhanced error messages
 client_socket = None
-max_retries = 3
+max_retries = 5  # INCREASED: More retry attempts
 
 for attempt in range(max_retries):
     try:
         print(f"Connection attempt {attempt + 1}/{max_retries}")
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.settimeout(10.0)
+        client_socket.settimeout(15.0)  # INCREASED: Longer timeout
         client_socket.connect((server_ip, 5555))
         client_socket.settimeout(None)
         print(f"Successfully connected to Computer A at {server_ip}")
@@ -218,6 +219,17 @@ for attempt in range(max_retries):
         if client_socket:
             client_socket.close()
         client_socket = None
+    except ConnectionRefusedError:
+        print(f"Connection attempt {attempt + 1} refused - Computer A may not be ready")
+        if client_socket:
+            client_socket.close()
+        client_socket = None
+    except socket.gaierror:
+        print(f"Connection attempt {attempt + 1} failed - Invalid IP address: {server_ip}")
+        if client_socket:
+            client_socket.close()
+        client_socket = None
+        break  # Don't retry for invalid IP
     except Exception as e:
         print(f"Connection attempt {attempt + 1} failed: {e}")
         if client_socket:
@@ -225,11 +237,16 @@ for attempt in range(max_retries):
         client_socket = None
     
     if attempt < max_retries - 1:
-        print("Retrying in 2 seconds...")
-        time.sleep(2)
+        print("Retrying in 3 seconds...")
+        time.sleep(3)  # INCREASED: Longer wait between retries
 
 if client_socket is None:
     print("Failed to connect to Computer A after all attempts")
+    print("Possible solutions:")
+    print("1. Check that Computer A is running and shows 'Server listening...'")
+    print("2. Verify Computer A's IP address (should be 100.1.1.10)")
+    print("3. Check ethernet cable connection")
+    print("4. Make sure both computers are on the same ethernet network")
     print("Continuing without network connection")
 
 # Function to continuously send gaze data to Computer A

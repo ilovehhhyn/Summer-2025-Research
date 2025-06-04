@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""
+Ultimate Gaze Tracking Debug
+This will check EVERYTHING and tell us exactly what's wrong
+"""
+
+import pylink
+import os
+import sys
+from psychopy import visual, core, event, monitors, gui
+from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+
+def comprehensive_debug():
+    """Check everything that could prevent gaze tracking"""
+    
+    print("=" * 60)
+    print("ULTIMATE GAZE TRACKING DEBUG")
+    print("=" * 60)
+    
+    # Step 1: Connection test
+    print("\n1. CONNECTION TEST")
+    print("-" * 20)
+    try:
+        el_tracker = pylink.EyeLink("100.1.1.1")
+        print("✓ Connected to EyeLink at 100.1.1.1")
+        
+        # Get detailed tracker info
+        if el_tracker.isConnected():
+            print("✓ Connection verified")
+            try:
+                version = el_tracker.getTrackerVersionString()
+                print(f"✓ Tracker version: {version}")
+            except:
+                print("⚠️  Could not get version string")
+        else:
+            print("✗ Connection failed verification")
+            return
+            
+    except Exception as e:
+        print(f"✗ Connection error: {e}")
+        return
+    
+    # Step 2: Check tracker capabilities
+    print("\n2. TRACKER CAPABILITIES")
+    print("-" * 25)
+    try:
+        mode = el_tracker.getTrackerMode()
+        print(f"Current mode: {mode}")
+        
+        # Check if tracker supports what we need
+        el_tracker.sendCommand("?sample_rate")
+        pylink.msecDelay(50)
+        
+        el_tracker.sendCommand("?tracking")
+        pylink.msecDelay(50)
+        
+        print("✓ Tracker appears functional")
+    except Exception as e:
+        print(f"⚠️  Tracker capability check failed: {e}")
+    
+    # Step 3: Setup and configuration
+    print("\n3. SETUP AND CONFIGURATION")
+    print("-" * 30)
+    
+    # Open data file
+    try:
+        el_tracker.openDataFile("DEBUG.EDF")
+        print("✓ Data file opened")
+    except Exception as e:
+        print(f"✗ Data file error: {e}")
+        return
+    
+    # Configure for maximum sample data
+    el_tracker.setOfflineMode()
+    pylink.msecDelay(100)
+    
+    # Very explicit configuration
+    print("Configuring tracker for maximum data...")
+    commands = [
+        "clear_screen 0",
+        "sample_rate 500",
+        "link_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT",
+        "link_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
+        "file_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT", 
+        "file_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
+        "recording_parse_type = GAZE",
+        "saccade_velocity_threshold = 30",
+        "saccade_acceleration_threshold = 9500"
+    ]
+    
+    for cmd in commands:
+        el_tracker.sendCommand(cmd)
+        pylink.msecDelay(10)
+    
+    print("✓ Tracker configured with maximum data")
+    
+    # Step 4: Display setup
+    print("\n4. DISPLAY SETUP")
+    print("-" * 17)
+    win = visual.Window(fullscr=False, size=[800, 600], units='pix', color=[0, 0, 0])
+    scn_width, scn_height = win.size
+    print(f"✓ Window: {scn_width} x {scn_height}")
+    
+    # Configure screen coordinates
+    el_coords = f"screen_pixel_coords = 0 0 {scn_width - 1} {scn_height - 1}"
+    el_tracker.sendCommand(el_coords)
+    print(f"✓ Screen coordinates: {el_coords}")
+    
+    # Graphics setup
+    genv = EyeLinkCoreGraphicsPsychoPy(el_tracker, win)
+    pylink.openGraphicsEx(genv)
+    print("✓ Graphics environment ready")
+    
+    # Step 5: Multiple recording attempts
+    print("\n5. RECORDING ATTEMPTS")
+    print("-" * 22)
+    
+    recording_success = False
+    for attempt in range(3):
+        print(f"\nAttempt {attempt + 1}:")
+        
+        # Reset everything
+        el_tracker.setOfflineMode()
+        pylink.msecDelay(100)
+        
+        # Try to start recording
+        try:
+            error = el_tracker.startRecording(1, 1, 1, 1)
+            print(f"  startRecording() returned: {error}")
+            
+            if error == 0:
+                pylink.msecDelay(300)  # Longer wait
+                
+                # Test immediately for samples
+                print("  Testing for immediate samples...")
+                for i in range(10):
+                    sample = el_tracker.getNewestSample()
+                    if sample is not None:
+                        print(f"    Got sample on test {i+1}")
+                        recording_success = True
+                        break
+                    pylink.msecDelay(10)
+                
+                if recording_success:
+                    break
+                else:
+                    print("    No samples received")
+            else:
+                print(f"    Recording start failed with error: {error}")
+                
+        except Exception as e:
+            print(f"    Exception during recording: {e}")
+    
+    if not recording_success:
+        print("\n⚠️  WARNING: Could not get samples from any recording attempt")
+        print("   This suggests a fundamental tracker/setup issue")
+        print("   Continuing with sample analysis anyway...")
+    
+    # Step 6: Detailed sample analysis
+    print("\n6. DETAILED SAMPLE ANALYSIS")
+    print("-" * 30)
+    
+    # Visual elements
+    gaze_marker = visual.Circle(win=win, radius=20, fillColor='red', lineColor='yellow', lineWidth=4)
+    center_cross = visual.ShapeStim(win, vertices=[(0, -20), (0, 20), (0, 0), (-20, 0), (20, 0)], 
+                                   lineColor='white', lineWidth=3)
+    
+    # Detailed status display
+    status_lines = []
+    for i in range(8):
+        line = visual.TextStim(win, text='', pos=[0, 250 - i*30], color='white', height=16)
+        status_lines.append(line)
+    
+    instruction = visual.TextStim(win, text='DETAILED GAZE ANALYSIS\nLook around - detailed info above\nPress SPACE for calibration, ESCAPE to quit', 
+                                pos=[0, -250], color='yellow', height=18)
+    
+    # Counters for detailed analysis
+    stats = {
+        'total_attempts': 0,
+        'samples_received': 0,
+        'left_eye_samples': 0,
+        'right_eye_samples': 0,
+        'valid_gaze_data': 0,
+        'missing_data': 0,
+        'gaze_positions': [],
+        'last_valid_gaze': None,
+        'coordinate_issues': 0
+    }
+    
+    print("Starting 20-second detailed analysis...")
+    print("LOOK AROUND THE SCREEN and watch for movement")
+    
+    start_time = core.getTime()
+    
+    while core.getTime() - start_time < 20.0:
+        stats['total_attempts'] += 1
+        
+        # Try to get sample
+        sample = None
+        try:
+            sample = el_tracker.getNewestSample()
+        except Exception as e:
+            if stats['total_attempts'] % 100 == 0:
+                print(f"    Sample retrieval error: {e}")
+        
+        # Analyze sample in detail
+        sample_info = f"Time: {core.getTime() - start_time:.1f}s"
+        gaze_info = "No sample"
+        coordinate_info = ""
+        eye_info = ""
+        
+        if sample is not None:
+            stats['samples_received'] += 1
+            sample_info += f" | Sample: YES"
+            
+            # Check eye availability
+            left_available = sample.isLeftSample()
+            right_available = sample.isRightSample()
+            
+            gaze_data = None
+            
+            if right_available:
+                stats['right_eye_samples'] += 1
+                try:
+                    gaze_data = sample.getRightEye().getGaze()
+                    eye_info = "RIGHT eye"
+                except:
+                    eye_info = "RIGHT eye (error)"
+            elif left_available:
+                stats['left_eye_samples'] += 1
+                try:
+                    gaze_data = sample.getLeftEye().getGaze()
+                    eye_info = "LEFT eye"
+                except:
+                    eye_info = "LEFT eye (error)"
+            else:
+                eye_info = "NO eye data"
+            
+            # Analyze gaze data
+            if gaze_data:
+                if gaze_data[0] != pylink.MISSING_DATA and gaze_data[1] != pylink.MISSING_DATA:
+                    stats['valid_gaze_data'] += 1
+                    stats['last_valid_gaze'] = gaze_data
+                    stats['gaze_positions'].append(gaze_data)
+                    
+                    # Convert coordinates
+                    try:
+                        gaze_x = gaze_data[0] - win.size[0]/2
+                        gaze_y = win.size[1]/2 - gaze_data[1]
+                        
+                        # Check if coordinates are reasonable
+                        if abs(gaze_x) > win.size[0] or abs(gaze_y) > win.size[1]:
+                            stats['coordinate_issues'] += 1
+                            coordinate_info = f"OUT OF BOUNDS: ({gaze_x:.0f}, {gaze_y:.0f})"
+                        else:
+                            # Update marker position
+                            gaze_marker.setPos([gaze_x, gaze_y])
+                            coordinate_info = f"Screen: ({gaze_x:.0f}, {gaze_y:.0f})"
+                        
+                        gaze_info = f"Raw: ({gaze_data[0]:.1f}, {gaze_data[1]:.1f})"
+                        
+                    except Exception as e:
+                        coordinate_info = f"Coordinate error: {e}"
+                        
+                else:
+                    stats['missing_data'] += 1
+                    gaze_info = "MISSING gaze data"
+            else:
+                gaze_info = "No gaze data available"
+        
+        else:
+            sample_info += f" | Sample: NO"
+        
+        # Update display
+        win.clearBuffer()
+        center_cross.draw()
+        gaze_marker.draw()
+        
+        # Show detailed status
+        status_texts = [
+            sample_info,
+            f"Eye: {eye_info}",
+            f"Gaze: {gaze_info}",
+            f"Coords: {coordinate_info}",
+            f"Valid samples: {stats['valid_gaze_data']}/{stats['total_attempts']} ({100*stats['valid_gaze_data']/max(1,stats['total_attempts']):.1f}%)",
+            f"Left eye: {stats['left_eye_samples']} | Right eye: {stats['right_eye_samples']}",
+            f"Missing data: {stats['missing_data']} | Coord issues: {stats['coordinate_issues']}",
+            f"Recording status: {el_tracker.isRecording()}"
+        ]
+        
+        for i, text in enumerate(status_texts):
+            if i < len(status_lines):
+                status_lines[i].setText(text)
+                status_lines[i].draw()
+        
+        instruction.draw()
+        win.flip()
+        
+        # Print periodic updates
+        if stats['total_attempts'] % 300 == 0:  # Every ~5 seconds
+            valid_rate = 100 * stats['valid_gaze_data'] / max(1, stats['total_attempts'])
+            print(f"  Progress: {valid_rate:.1f}% valid gaze data ({stats['valid_gaze_data']}/{stats['total_attempts']})")
+            if stats['last_valid_gaze']:
+                print(f"  Last valid gaze: ({stats['last_valid_gaze'][0]:.1f}, {stats['last_valid_gaze'][1]:.1f})")
+        
+        # Check for user input
+        keys = event.getKeys()
+        if 'escape' in keys:
+            break
+        elif 'space' in keys:
+            print("\n*** USER REQUESTED CALIBRATION ***")
+            try:
+                el_tracker.doTrackerSetup()
+                print("Calibration completed, resuming...")
+            except Exception as e:
+                print(f"Calibration error: {e}")
+        
+        core.wait(0.016)
+    
+    # Final comprehensive report
+    print("\n" + "=" * 60)
+    print("FINAL DIAGNOSTIC REPORT")
+    print("=" * 60)
+    
+    total = stats['total_attempts']
+    valid_rate = (stats['valid_gaze_data'] / max(1, total)) * 100
+    sample_rate = (stats['samples_received'] / max(1, total)) * 100
+    
+    print(f"\nSAMPLE STATISTICS:")
+    print(f"  Total attempts: {total}")
+    print(f"  Samples received: {stats['samples_received']} ({sample_rate:.1f}%)")
+    print(f"  Valid gaze data: {stats['valid_gaze_data']} ({valid_rate:.1f}%)")
+    print(f"  Left eye samples: {stats['left_eye_samples']}")
+    print(f"  Right eye samples: {stats['right_eye_samples']}")
+    print(f"  Missing data instances: {stats['missing_data']}")
+    print(f"  Coordinate issues: {stats['coordinate_issues']}")
+    
+    print(f"\nDIAGNOSIS:")
+    
+    if valid_rate == 0:
+        print("🔴 CRITICAL: No valid gaze data received")
+        print("   Possible causes:")
+        print("   1. Tracker needs CALIBRATION (press SPACE during test)")
+        print("   2. Participant not visible to tracker cameras")
+        print("   3. Poor lighting conditions")
+        print("   4. Hardware connection issue")
+        print("   5. Tracker not properly set up")
+        print("\n   RECOMMENDATION: Run calibration first!")
+        
+    elif valid_rate < 20:
+        print("🟡 POOR: Very low gaze data quality")
+        print("   - Tracker may need calibration")
+        print("   - Check participant position and lighting")
+        
+    elif valid_rate < 70:
+        print("🟠 FAIR: Moderate gaze data quality")
+        print("   - May need calibration for better accuracy")
+        print("   - Gaze dot should move but may be inaccurate")
+        
+    else:
+        print("🟢 GOOD: High quality gaze data")
+        print("   - Gaze tracking should work well")
+        print("   - If dot still not moving, check coordinate conversion")
+    
+    if stats['coordinate_issues'] > 0:
+        print(f"\n⚠️  COORDINATE WARNING: {stats['coordinate_issues']} out-of-bounds coordinates detected")
+        print("   This suggests screen coordinate configuration issues")
+    
+    if stats['gaze_positions']:
+        # Analyze gaze position distribution
+        x_coords = [pos[0] for pos in stats['gaze_positions'][-100:]]  # Last 100 positions
+        y_coords = [pos[1] for pos in stats['gaze_positions'][-100:]]
+        
+        if x_coords and y_coords:
+            x_range = max(x_coords) - min(x_coords)
+            y_range = max(y_coords) - min(y_coords)
+            print(f"\n📊 GAZE MOVEMENT ANALYSIS (last 100 samples):")
+            print(f"   X movement range: {x_range:.1f} pixels")
+            print(f"   Y movement range: {y_range:.1f} pixels")
+            
+            if x_range < 50 and y_range < 50:
+                print("   ⚠️  Very limited gaze movement detected")
+                print("   Participant may not be looking around or tracker not calibrated")
+            elif x_range > 500 or y_range > 500:
+                print("   ✓ Good gaze movement range detected")
+    
+    # Cleanup
+    print(f"\nCleaning up...")
+    try:
+        el_tracker.stopRecording()
+        el_tracker.closeDataFile()
+        el_tracker.close()
+    except:
+        pass
+    win.close()
+    core.quit()
+
+if __name__ == "__main__":
+    comprehensive_debug()

@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+"""
+Complete Game with Eye Tracking - WITH Real-time Gaze Display
+Records eye tracking data AND shows gaze dot in real-time
+"""
+
+import pylink
+import os
+import platform
+import random
+import time
+import sys
+from psychopy import visual, core, event, monitors, gui
+from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+from PIL import Image
+from string import ascii_letters, digits
+
+# Global variables
+el_tracker = None
+win = None
+
+# Switch to the script folder
+script_path = os.path.dirname(sys.argv[0])
+if len(script_path) != 0:
+    os.chdir(script_path)
+
+# Show only critical log message in the PsychoPy console
+from psychopy import logging
+logging.console.setLevel(logging.CRITICAL)
+
+# Configuration variables
+use_retina = False
+dummy_mode = False
+full_screen = True  # Use full screen for larger display
+
+print("=" * 60)
+print("COMPLETE GAME WITH EYE TRACKING - WITH GAZE DISPLAY")
+print("=" * 60)
+
+# Set up EDF data file name
+edf_fname = 'GAZE_GAME'
+
+# Prompt user to specify an EDF data filename
+dlg_title = 'Eye Tracking Game - Enter EDF File Name'
+dlg_prompt = 'Please enter a file name with 8 or fewer characters\n[letters, numbers, and underscore].'
+
+while True:
+    dlg = gui.Dlg(dlg_title)
+    dlg.addText(dlg_prompt)
+    dlg.addField('File Name:', edf_fname)
+    ok_data = dlg.show()
+    if dlg.OK:
+        print('EDF data filename: {}'.format(ok_data[0]))
+    else:
+        print('user cancelled')
+        core.quit()
+        sys.exit()
+
+    tmp_str = dlg.data[0]
+    edf_fname = tmp_str.rstrip().split('.')[0]
+
+    allowed_char = ascii_letters + digits + '_'
+    if not all([c in allowed_char for c in edf_fname]):
+        print('ERROR: Invalid EDF filename')
+    elif len(edf_fname) > 8:
+        print('ERROR: EDF filename should not exceed 8 characters')
+    else:
+        break
+
+# Set up folders
+results_folder = 'results'
+if not os.path.exists(results_folder):
+    os.makedirs(results_folder)
+
+time_str = time.strftime("_%Y_%m_%d_%H_%M", time.localtime())
+session_identifier = edf_fname + time_str
+session_folder = os.path.join(results_folder, session_identifier)
+if not os.path.exists(session_folder):
+    os.makedirs(session_folder)
+
+# Connect to EyeLink
+print("\n1. CONNECTING TO EYELINK")
+print("-" * 30)
+if dummy_mode:
+    el_tracker = pylink.EyeLink(None)
+    print("Running in DUMMY mode")
+else:
+    try:
+        el_tracker = pylink.EyeLink("100.1.1.1")
+        print("✓ Connected to EyeLink Host at 100.1.1.1")
+        
+        if el_tracker.isConnected():
+            try:
+                version = el_tracker.getTrackerVersionString()
+                print(f"✓ Tracker version: {version}")
+            except:
+                print("⚠️  Could not get version string")
+    except RuntimeError as error:
+        print('ERROR:', error)
+        print('Switching to dummy mode...')
+        dummy_mode = True
+        el_tracker = pylink.EyeLink(None)
+
+# Open EDF file
+edf_file = edf_fname + ".EDF"
+try:
+    el_tracker.openDataFile(edf_file)
+    print(f"✓ Data file opened: {edf_file}")
+except RuntimeError as err:
+    print('ERROR:', err)
+    if el_tracker.isConnected():
+        el_tracker.close()
+    core.quit()
+    sys.exit()
+
+# Configure tracker (enhanced for real-time gaze display)
+print("\n2. CONFIGURING TRACKER")
+print("-" * 25)
+el_tracker.setOfflineMode()
+pylink.msecDelay(100)
+
+# Enhanced configuration for maximum data (from first code)
+commands = [
+    "clear_screen 0",
+    "sample_rate 500",
+    "link_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT",
+    "link_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
+    "file_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT", 
+    "file_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
+    "recording_parse_type = GAZE",
+    "saccade_velocity_threshold = 30",
+    "saccade_acceleration_threshold = 9500",
+    "calibration_type = HV9"
+]
+
+for cmd in commands:
+    el_tracker.sendCommand(cmd)
+    pylink.msecDelay(10)
+
+print("✓ Tracker configured for recording with real-time display")
+
+# Set up LARGE graphics display
+print("\n3. SETTING UP LARGE DISPLAY")
+print("-" * 32)
+mon = monitors.Monitor('myMonitor', width=53.0, distance=70.0)
+win = visual.Window(fullscr=full_screen, monitor=mon, winType='pyglet', units='pix', color=[0, 0, 0])
+
+scn_width, scn_height = win.size
+print(f"✓ Large Window: {scn_width} x {scn_height}")
+
+if 'Darwin' in platform.system() and use_retina:
+    scn_width = int(scn_width/2.0)
+    scn_height = int(scn_height/2.0)
+
+# Configure EyeLink graphics
+el_coords = "screen_pixel_coords = 0 0 %d %d" % (scn_width - 1, scn_height - 1)
+el_tracker.sendCommand(el_coords)
+print(f"✓ Screen coordinates: {el_coords}")
+
+genv = EyeLinkCoreGraphicsPsychoPy(el_tracker, win)
+foreground_color = (-1, -1, -1)
+background_color = win.color
+genv.setCalibrationColors(foreground_color, background_color)
+
+# Set up calibration target
+if os.path.exists('images/fixTarget.bmp'):
+    genv.setTargetType('picture')
+    genv.setPictureTarget(os.path.join('images', 'fixTarget.bmp'))
+
+genv.setCalibrationSounds('', '', '')
+
+if use_retina:
+    genv.fixMacRetinaDisplay()
+
+pylink.openGraphicsEx(genv)
+print("✓ Graphics environment ready")
+
+# Create visual elements (INCLUDING gaze marker from first code)
+print("\n4. CREATING VISUAL ELEMENTS")
+print("-" * 30)
+
+# Gaze marker (from first code)
+gaze_marker = visual.Circle(win=win, radius=20, fillColor='red', lineColor='yellow', lineWidth=4)
+
+# Large center cross for reference
+center_cross = visual.ShapeStim(win, vertices=[(0, -40), (0, 40), (0, 0), (-40, 0), (40, 0)], 
+                               lineColor='white', lineWidth=4)
+
+# Corner markers to show screen boundaries
+corner_size = 40
+corners = []
+corner_positions = [
+    (-scn_width//2 + corner_size, scn_height//2 - corner_size),  # Top-left
+    (scn_width//2 - corner_size, scn_height//2 - corner_size),   # Top-right
+    (-scn_width//2 + corner_size, -scn_height//2 + corner_size), # Bottom-left
+    (scn_width//2 - corner_size, -scn_height//2 + corner_size)   # Bottom-right
+]
+
+for pos in corner_positions:
+    corner = visual.Circle(win=win, radius=20, fillColor='cyan', lineColor='white', lineWidth=2, pos=pos)
+    corners.append(corner)
+
+# Simple status display
+status_text = visual.TextStim(win, text='', pos=[0, scn_height//2 - 60], color='white', height=24)
+
+# Gaze statistics (from first code)
+gaze_stats = {
+    'total_attempts': 0,
+    'samples_received': 0,
+    'left_eye_samples': 0,
+    'right_eye_samples': 0,
+    'valid_gaze_data': 0,
+    'missing_data': 0,
+    'last_valid_gaze': None,
+    'coordinate_issues': 0
+}
+
+print(f"✓ Visual elements created - Screen: {scn_width}x{scn_height}")
+
+# Enhanced gaze tracking function (from first code)
+def update_gaze_display():
+    """Update gaze marker position based on current eye tracking data"""
+    global gaze_stats
+    
+    gaze_stats['total_attempts'] += 1
+    
+    # Get newest sample
+    sample = None
+    try:
+        sample = el_tracker.getNewestSample()
+    except Exception as e:
+        if gaze_stats['total_attempts'] % 1000 == 0:  # Less frequent error reporting
+            print(f"Sample retrieval error: {e}")
+    
+    if sample is not None:
+        gaze_stats['samples_received'] += 1
+        
+        # Check eye availability
+        left_available = sample.isLeftSample()
+        right_available = sample.isRightSample()
+        
+        gaze_data = None
+        
+        # Try RIGHT EYE first
+        if right_available:
+            gaze_stats['right_eye_samples'] += 1
+            try:
+                gaze_data = sample.getRightEye().getGaze()
+            except:
+                pass
+        
+        # Try LEFT EYE if right not available
+        elif left_available:
+            gaze_stats['left_eye_samples'] += 1
+            try:
+                gaze_data = sample.getLeftEye().getGaze()
+            except:
+                pass
+        
+        # Process gaze data
+        if gaze_data:
+            # Check if gaze data is valid (not missing)
+            if gaze_data[0] != pylink.MISSING_DATA and gaze_data[1] != pylink.MISSING_DATA:
+                gaze_stats['valid_gaze_data'] += 1
+                gaze_stats['last_valid_gaze'] = gaze_data
+                
+                # Convert from EyeLink coordinates to PsychoPy coordinates
+                try:
+                    gaze_x = gaze_data[0] - win.size[0]/2
+                    gaze_y = win.size[1]/2 - gaze_data[1]
+                    
+                    # Check if coordinates are reasonable
+                    if abs(gaze_x) <= win.size[0] and abs(gaze_y) <= win.size[1]:
+                        # Update marker position
+                        gaze_marker.setPos([gaze_x, gaze_y])
+                    else:
+                        gaze_stats['coordinate_issues'] += 1
+                        
+                except Exception as e:
+                    pass
+            else:
+                gaze_stats['missing_data'] += 1
+
+# Helper functions
+def clear_screen(win):
+    win.clearBuffer()
+    win.flip()
+
+def show_msg(win, text, wait_for_keypress=True):
+    msg = visual.TextStim(win, text, color='white', wrapWidth=scn_width/2, height=28)
+    clear_screen(win)
+    msg.draw()
+    win.flip()
+    if wait_for_keypress:
+        event.waitKeys()
+        clear_screen(win)
+
+def terminate_task():
+    global el_tracker
+    
+    print("\nCleaning up...")
+    if el_tracker and el_tracker.isConnected():
+        try:
+            if el_tracker.isRecording():
+                el_tracker.stopRecording()
+            el_tracker.setOfflineMode()
+            el_tracker.sendCommand('clear_screen 0')
+            pylink.msecDelay(500)
+            el_tracker.closeDataFile()
+            
+            # Download EDF file
+            local_edf = os.path.join(session_folder, session_identifier + '.EDF')
+            try:
+                el_tracker.receiveDataFile(edf_file, local_edf)
+                print(f"✓ Data file saved: {local_edf}")
+            except RuntimeError as error:
+                print('Data file download error:', error)
+            
+            el_tracker.close()
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+    
+    # Print final gaze statistics
+    if gaze_stats['total_attempts'] > 0:
+        valid_rate = 100 * gaze_stats['valid_gaze_data'] / gaze_stats['total_attempts']
+        print(f"\nFinal Gaze Statistics:")
+        print(f"  Valid gaze data: {gaze_stats['valid_gaze_data']}/{gaze_stats['total_attempts']} ({valid_rate:.1f}%)")
+        print(f"  Left eye samples: {gaze_stats['left_eye_samples']}")
+        print(f"  Right eye samples: {gaze_stats['right_eye_samples']}")
+        print(f"  Missing data: {gaze_stats['missing_data']}")
+        print(f"  Coordinate issues: {gaze_stats['coordinate_issues']}")
+    
+    win.close()
+    core.quit()
+    sys.exit()
+
+# Show instructions
+task_msg = 'Eye Tracking Game - WITH Real-time Gaze Display\n\n'
+task_msg += 'FEATURES:\n'
+task_msg += '• Red/yellow dot shows where you are looking\n'
+task_msg += '• Complete calibration (follow the dots)\n'
+task_msg += '• Play the game with live gaze feedback\n'
+task_msg += '• Eye movements recorded for analysis\n\n'
+task_msg += 'Controls: SPACE=recalibrate, ESCAPE=quit\n\n'
+if dummy_mode:
+    task_msg += '⚠️  DUMMY MODE: Simulated eye tracking\n'
+task_msg += 'Press ENTER to begin calibration'
+
+show_msg(win, task_msg)
+
+# Calibration
+print("\n5. CALIBRATION")
+print("-" * 15)
+if not dummy_mode:
+    try:
+        print("Starting calibration...")
+        print("IMPORTANT: After calibration/validation, press ESCAPE to return to game!")
+        el_tracker.doTrackerSetup()
+        print("✓ Calibration completed - make sure you pressed ESCAPE!")
+        
+        # Ensure we're out of calibration mode
+        el_tracker.exitCalibration()
+        el_tracker.setOfflineMode()
+        pylink.msecDelay(200)
+        
+    except RuntimeError as err:
+        print('Calibration ERROR:', err)
+        el_tracker.exitCalibration()
+
+# Main game experiment (WITH gaze display)
+try:
+    print("\n6. STARTING MAIN GAME WITH GAZE DISPLAY")
+    print("-" * 42)
+    
+    # Start recording for game with multiple attempts (from first code)
+    recording_success = False
+    for attempt in range(3):
+        print(f"Recording attempt {attempt + 1}:")
+        
+        el_tracker.setOfflineMode()
+        pylink.msecDelay(100)
+        
+        error = el_tracker.startRecording(1, 1, 1, 1)
+        print(f"  startRecording() returned: {error}")
+        
+        if error == 0:
+            pylink.msecDelay(300)
+            
+            # Test for samples
+            for i in range(10):
+                sample = el_tracker.getNewestSample()
+                if sample is not None:
+                    print(f"  Got sample on test {i+1}")
+                    recording_success = True
+                    break
+                pylink.msecDelay(10)
+            
+            if recording_success:
+                break
+        else:
+            print(f"  Recording start failed with error: {error}")
+    
+    if recording_success:
+        el_tracker.sendMessage("GAME_START")
+        print("✓ Recording active - starting game with gaze display")
+        
+        # Create game stimuli
+        if not os.path.exists("PSY stimuli"):
+            os.makedirs("PSY stimuli")
+        
+        # Define stimuli
+        images = []
+        image_names = ["car.png", "hand.png", "face.png", "house.png"]
+        for name in image_names:
+            if os.path.exists(f"PSY stimuli/{name}"):
+                images.append(f"PSY stimuli/{name}")
+            else:
+                images.append(None)
+        
+        # Grid positions for stimuli (adapted for larger screen)
+        grid_scale = min(scn_width, scn_height) / 800  # Scale based on screen size
+        base_offset = int(200 * grid_scale)
+        grid_positions = [
+            (-base_offset, base_offset), 
+            (base_offset, base_offset), 
+            (-base_offset, -base_offset), 
+            (base_offset, -base_offset)
+        ]
+        image_size = (int(150 * grid_scale), int(150 * grid_scale))
+        
+        print(f"Game setup: Grid scale {grid_scale:.2f}, Image size {image_size}")
+        
+        # Main game loop (WITH gaze tracking display)
+        num_trials = 4
+        for trial in range(num_trials):
+            print(f"\nStarting trial {trial + 1}")
+            
+            el_tracker.sendMessage(f'TRIALID {trial}')
+            
+            # Fixation period with gaze display
+            fixation = visual.TextStim(win, text="+", color=(-1, -1, -1), height=60)
+            
+            start_time = core.getTime()
+            while core.getTime() - start_time < 1.5:
+                # Update gaze display
+                update_gaze_display()
+                
+                # Clear and draw
+                win.clearBuffer()
+                
+                # Draw corner markers for reference
+                for corner in corners:
+                    corner.draw()
+                
+                # Draw center cross
+                center_cross.draw()
+                
+                # Draw fixation
+                fixation.draw()
+                
+                # Draw gaze marker
+                gaze_marker.draw()
+                
+                # Show status with gaze info
+                valid_rate = 100 * gaze_stats['valid_gaze_data'] / max(1, gaze_stats['total_attempts'])
+                status_text.setText(f"TRIAL {trial + 1} - FIXATION\nLook at the + sign\nGaze tracking: {valid_rate:.0f}% valid\nSPACE=recalibrate ESCAPE=quit")
+                status_text.draw()
+                
+                win.flip()
+                core.wait(0.016)
+                
+                # Check for quit/recalibrate
+                keys = event.getKeys()
+                if 'escape' in keys:
+                    raise KeyboardInterrupt
+                elif 'space' in keys:
+                    print("Recalibrating during trial...")
+                    try:
+                        el_tracker.doTrackerSetup()
+                        el_tracker.exitCalibration()
+                        pylink.msecDelay(200)
+                        if not el_tracker.isRecording():
+                            el_tracker.startRecording(1, 1, 1, 1)
+                            pylink.msecDelay(500)
+                    except Exception as e:
+                        print(f"Recalibration error: {e}")
+            
+            # Stimulus presentation with gaze display
+            shuffled_positions = random.sample(grid_positions, len(grid_positions))
+            el_tracker.sendMessage('stimuli_onset')
+            
+            start_time = core.getTime()
+            while core.getTime() - start_time < 4.0:
+                # Update gaze display
+                update_gaze_display()
+                
+                # Clear and draw
+                win.clearBuffer()
+                
+                # Draw corner markers
+                for corner in corners:
+                    corner.draw()
+                
+                # Draw center cross
+                center_cross.draw()
+                
+                # Draw stimuli
+                for i, pos in enumerate(shuffled_positions):
+                    if i < len(images) and images[i] and os.path.exists(images[i]):
+                        stim = visual.ImageStim(win, image=images[i], pos=pos, size=image_size)
+                    else:
+                        text_labels = ["CAR", "HAND", "FACE", "HOUSE"]
+                        stim = visual.TextStim(win, text=text_labels[i], pos=pos, color=(-1, -1, -1), height=40)
+                    stim.draw()
+                
+                # Draw gaze marker
+                gaze_marker.draw()
+                
+                # Show status with gaze info
+                valid_rate = 100 * gaze_stats['valid_gaze_data'] / max(1, gaze_stats['total_attempts'])
+                status_text.setText(f"TRIAL {trial + 1} - STIMULI\nLook at different images\nGaze tracking: {valid_rate:.0f}% valid\nSPACE=recalibrate ESCAPE=quit")
+                status_text.draw()
+                
+                win.flip()
+                core.wait(0.016)
+                
+                # Check for quit/recalibrate
+                keys = event.getKeys()
+                if 'escape' in keys:
+                    raise KeyboardInterrupt
+                elif 'space' in keys:
+                    print("Recalibrating during trial...")
+                    try:
+                        el_tracker.doTrackerSetup()
+                        el_tracker.exitCalibration()
+                        pylink.msecDelay(200)
+                        if not el_tracker.isRecording():
+                            el_tracker.startRecording(1, 1, 1, 1)
+                            pylink.msecDelay(500)
+                    except Exception as e:
+                        print(f"Recalibration error: {e}")
+            
+            # Clear screen
+            clear_screen(win)
+            el_tracker.sendMessage('stimuli_offset')
+            core.wait(1.0)
+        
+        # Stop recording
+        el_tracker.stopRecording()
+        print("✓ Game completed successfully")
+        
+        # Show completion message with gaze statistics
+        valid_rate = 100 * gaze_stats['valid_gaze_data'] / max(1, gaze_stats['total_attempts'])
+        completion_msg = f'Game Completed!\n\nGaze Tracking Statistics:\n• Valid gaze data: {valid_rate:.1f}%\n• Total samples: {gaze_stats["samples_received"]}\n• Left eye: {gaze_stats["left_eye_samples"]} | Right eye: {gaze_stats["right_eye_samples"]}\n\nData saved to EDF file for analysis\n\nPress any key to exit'
+        
+        show_msg(win, completion_msg)
+        
+    else:
+        print("✗ Failed to establish gaze tracking")
+        show_msg(win, "Could not establish gaze tracking\nPress any key to exit")
+
+except KeyboardInterrupt:
+    print("Game interrupted by user")
+except Exception as e:
+    print(f"Game error: {e}")
+    import traceback
+    traceback.print_exc()
+
+finally:
+    terminate_task()

@@ -122,7 +122,7 @@ pylink.msecDelay(100)
 # Enhanced configuration for maximum data (from first code)
 commands = [
     "clear_screen 0",
-    "sample_rate 500",
+    "sample_rate 1000",
     "link_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT",
     "link_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
     "file_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT", 
@@ -467,7 +467,7 @@ try:
                 status_text.draw()
                 
                 win.flip()
-                core.wait(0.016)
+                core.wait(0.008)  # ~120Hz refresh for smoother gaze display
                 
                 # Check for quit/recalibrate
                 keys = event.getKeys()
@@ -522,7 +522,7 @@ try:
                 status_text.draw()
                 
                 win.flip()
-                core.wait(0.016)
+                core.wait(0.008)  # ~120Hz refresh for smoother gaze display
                 
                 # Check for quit/recalibrate
                 keys = event.getKeys()

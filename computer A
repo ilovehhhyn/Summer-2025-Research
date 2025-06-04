@@ -17,6 +17,8 @@ import sys
 import socket
 import threading
 import json
+import subprocess
+import re
 from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
 from psychopy import visual, core, event, monitors, gui
 from PIL import Image
@@ -32,6 +34,77 @@ other_gaze_x = 0
 other_gaze_y = 0
 gaze_data_lock = threading.Lock()
 last_gaze_update = 0
+
+def get_ethernet_ip():
+    """Get the IP address of the ethernet interface (100.1.1.10) without netifaces"""
+    
+    # Method 1: Try to find the specific IP we're looking for
+    target_ip = '100.1.1.10'
+    
+    # Test if we can bind to the target IP directly
+    try:
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.bind((target_ip, 0))  # Bind to any available port
+        test_socket.close()
+        print(f"Successfully found and verified ethernet IP: {target_ip}")
+        return target_ip
+    except:
+        print(f"Cannot bind directly to {target_ip}, trying to find it...")
+    
+    # Method 2: Parse system network configuration
+    try:
+        if platform.system() == "Windows":
+            # Use ipconfig on Windows
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, shell=True)
+            output = result.stdout
+            
+            # Look for 100.1.1.x IP addresses
+            matches = re.findall(r'100\.1\.1\.\d+', output)
+            if matches:
+                found_ip = matches[0]  # Take the first match
+                print(f"Found ethernet IP via ipconfig: {found_ip}")
+                return found_ip
+                
+        else:
+            # Use ifconfig on Linux/Mac
+            try:
+                result = subprocess.run(['ifconfig'], capture_output=True, text=True)
+                output = result.stdout
+            except FileNotFoundError:
+                # Try 'ip addr' on newer Linux systems
+                result = subprocess.run(['ip', 'addr'], capture_output=True, text=True)
+                output = result.stdout
+            
+            # Look for 100.1.1.x IP addresses
+            matches = re.findall(r'100\.1\.1\.\d+', output)
+            if matches:
+                found_ip = matches[0]  # Take the first match
+                print(f"Found ethernet IP via system command: {found_ip}")
+                return found_ip
+    
+    except Exception as e:
+        print(f"Error running system commands: {e}")
+    
+    # Method 3: Try connecting to the other computer directly
+    # If Computer B is at 100.1.1.11, we can deduce our IP
+    try:
+        for last_octet in [10, 11, 12, 1, 2]:  # Common IP endings
+            test_ip = f'100.1.1.{last_octet}'
+            try:
+                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_socket.settimeout(0.1)  # Very short timeout
+                test_socket.bind((test_ip, 0))
+                test_socket.close()
+                print(f"Found working ethernet IP by testing: {test_ip}")
+                return test_ip
+            except:
+                continue
+    except:
+        pass
+    
+    # Method 4: Final fallback - return the expected IP
+    print("Using hardcoded ethernet IP as fallback: 100.1.1.10")
+    return '100.1.1.10'
 
 # Enhanced gaze display functions
 def receive_and_process_gaze_data():
@@ -210,22 +283,20 @@ print("Setting up server...")
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-# Try to get the local IP address
+# FIXED: Get the ethernet IP address instead of internet IP
 try:
-    # Connect to a remote server to determine local IP
-    temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    temp_socket.connect(("8.8.8.8", 80))
-    local_ip = temp_socket.getsockname()[0]
-    temp_socket.close()
-    print(f"Computer A's IP address: {local_ip}")
-except:
-    local_ip = socket.gethostbyname(socket.gethostname())
-    print(f"Computer A's IP address (fallback): {local_ip}")
+    local_ip = get_ethernet_ip()
+    print(f"Computer A's ethernet IP address: {local_ip}")
+except Exception as e:
+    print(f"Error getting ethernet IP: {e}")
+    local_ip = '100.1.1.10'  # Hardcode as last resort
+    print(f"Using hardcoded ethernet IP: {local_ip}")
 
 try:
-    server_socket.bind(('0.0.0.0', 5555))
+    # FIXED: Bind to the specific ethernet interface instead of all interfaces
+    server_socket.bind((local_ip, 5555))
     server_socket.listen(1)
-    print(f"Server listening on all interfaces at port 5555")
+    print(f"Server listening on ethernet interface {local_ip}:5555")
     print(f"Computer B should connect to: {local_ip}:5555")
     print("Waiting for Computer B to connect...")
     
@@ -242,8 +313,25 @@ try:
         
 except Exception as e:
     print(f"Server setup failed: {e}")
-    print("Continuing without network connection")
-    client_socket = None
+    print("Trying fallback to bind on all interfaces...")
+    try:
+        server_socket.bind(('0.0.0.0', 5555))
+        server_socket.listen(1)
+        print(f"Server listening on all interfaces at port 5555")
+        print(f"Computer B should connect to: {local_ip}:5555")
+        
+        server_socket.settimeout(30.0)
+        try:
+            client_socket, addr = server_socket.accept()
+            print(f"Computer B connected from {addr}")
+            server_socket.settimeout(None)
+        except socket.timeout:
+            print("Timeout waiting for Computer B - continuing without connection")
+            client_socket = None
+    except Exception as e2:
+        print(f"Fallback server setup also failed: {e2}")
+        print("Continuing without network connection")
+        client_socket = None
 
 # Function to continuously send gaze data
 def send_gaze_data():

@@ -1,53 +1,8 @@
-# Beautiful feedback with animations
-            feedback_icons = {'face': '🎭', 'limbs': '✋', 'house': '🏠', 'car': '🚗'}
-            feedback_color = 'lightgreen' if correct else 'lightcoral'
-            feedback_bg_color = 'darkgreen' if correct else 'darkred'
-            
-            if correct:
-                feedback_text_content = f'✨ Correct! ✨\nIt was {feedback_icons[correct_category]} {correct_category}!'
-            else:
-                feedback_text_content = f'💫 Almost! 💫\nIt was {feedback_icons[correct_category]} {correct_category}, not {feedback_icons[response_category]} {response_category}'
-            
-            feedback_background = visual.Rect(
-                win,
-                width=scn_width*0.5,
-                height=100,
-                pos=(0, -scn_height//4),
-                fillColor=feedback_bg_color,
-                lineColor='gold',
-                lineWidth=4
-            )
-            
-            feedback = visual.TextStim(
-                win,
-                text=feedback_text_content,
-                pos=(0, -scn_height//4),
-                height=20,
-                color=feedback_color,
-                bold=True
-            )
-            
-            # Animated feedback display
-            feedback_start_time = core.getTime()
-            while core.getTime() - feedback_start_time < 1.5:
-                update_gaze_display()
-                
-                # Gentle pulsing feedback
-                feedback_time = core.getTime()
-                feedback_pulse = 0.9 + 0.1 * np.sin((feedback_time - feedback_start_time) * 5)
-                
-                win.clearBuffer()
-                
-                # Draw shadows
-                for shadow in square_shadows:
-                    shadow.draw()
-                    
-                # Draw squares
-                for square in gray_squares:
-                    square.draw()#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Memory Grid Experiment with Eye Tracking - WITH Real-time Gaze Display
 6x6 grid memory task with eye tracking data recording and real-time gaze visualization
+FIXED VERSION: Compatible with all PsychoPy versions
 """
 
 import pylink
@@ -301,7 +256,7 @@ gaze_marker = visual.Circle(win=win, radius=18, fillColor='hotpink', lineColor='
 gaze_sparkle1 = visual.Circle(win=win, radius=8, fillColor='white', lineColor='lightblue', lineWidth=2)
 gaze_sparkle2 = visual.Circle(win=win, radius=4, fillColor='lightcyan', lineColor='white', lineWidth=1)
 
-# Cute corner decorations with pastel colors
+# Cute corner decorations with pastel colors - USING CIRCLES INSTEAD OF POLYGONS
 corner_size = 35
 corners = []
 corner_sparkles = []
@@ -318,10 +273,10 @@ for i, pos in enumerate(corner_positions):
     corner = visual.Circle(win=win, radius=20, fillColor=pastel_colors[i], lineColor='white', lineWidth=3, pos=pos)
     corners.append(corner)
     
-    # Small sparkle next to each corner
+    # Small sparkle next to each corner - USING CIRCLE INSTEAD OF POLYGON
     sparkle_pos = (pos[0] + 25, pos[1] - 25)
-    sparkle = visual.RegularPolygon(win=win, n=4, radius=8, fillColor='white', lineColor='gold', 
-                                  lineWidth=2, pos=sparkle_pos, ori=45)
+    sparkle = visual.Circle(win=win, radius=8, fillColor='white', lineColor='gold', 
+                          lineWidth=2, pos=sparkle_pos)
     corner_sparkles.append(sparkle)
 
 # Beautiful status display with gradient-like effect
@@ -331,23 +286,24 @@ status_background = visual.Rect(win=win, width=scn_width*0.8, height=80,
 status_text = visual.TextStim(win, text='', pos=[0, scn_height//2 - 60], color='lightcyan', 
                              height=18, bold=True)
 
-# Decorative border elements
+# Decorative border elements - USING CIRCLES INSTEAD OF STARS
 border_stars = []
 for i in range(12):  # Stars around the border
     angle = i * 30  # Every 30 degrees
     x = (scn_width//2 - 80) * np.cos(np.radians(angle))
     y = (scn_height//2 - 80) * np.sin(np.radians(angle))
-    star = visual.RegularPolygon(win=win, n=5, radius=12, fillColor='gold', lineColor='white',
-                               lineWidth=2, pos=[x, y])
+    star = visual.Circle(win=win, radius=12, fillColor='gold', lineColor='white',
+                        lineWidth=2, pos=[x, y])
     border_stars.append(star)
 
 # Title decoration
 title_background = visual.Rect(win=win, width=600, height=60, fillColor='mediumpurple', 
                               lineColor='white', lineWidth=4, pos=[0, scn_height//2 - 120])
-title_sparkle_left = visual.RegularPolygon(win=win, n=8, radius=15, fillColor='white', 
-                                         lineColor='gold', lineWidth=2, pos=[-320, scn_height//2 - 120])
-title_sparkle_right = visual.RegularPolygon(win=win, n=8, radius=15, fillColor='white', 
-                                          lineColor='gold', lineWidth=2, pos=[320, scn_height//2 - 120])
+# USING CIRCLES INSTEAD OF POLYGONS
+title_sparkle_left = visual.Circle(win=win, radius=15, fillColor='white', 
+                                 lineColor='gold', lineWidth=2, pos=[-320, scn_height//2 - 120])
+title_sparkle_right = visual.Circle(win=win, radius=15, fillColor='white', 
+                                  lineColor='gold', lineWidth=2, pos=[320, scn_height//2 - 120])
 
 # Gaze statistics
 gaze_stats = {
@@ -428,10 +384,6 @@ def update_gaze_display():
                         gaze_sparkle1.setPos([gaze_x + sparkle_offset1, gaze_y + sparkle_offset2])
                         gaze_sparkle2.setPos([gaze_x - sparkle_offset2, gaze_y - sparkle_offset1])
                         
-                        # Rotate sparkles for magical effect
-                        gaze_sparkle1.setOri(sparkle_time * 60)
-                        gaze_sparkle2.setOri(-sparkle_time * 90)
-                        
                     else:
                         gaze_stats['coordinate_issues'] += 1
                         
@@ -445,7 +397,9 @@ def draw_decorative_elements():
     # Draw border stars with gentle rotation
     star_time = core.getTime()
     for i, star in enumerate(border_stars):
-        star.setOri(star_time * 30 + i * 30)  # Different rotation for each star
+        # Create a gentle pulsing effect instead of rotation for circles
+        pulse = 0.8 + 0.2 * np.sin(star_time * 2 + i * 0.5)
+        star.setRadius(12 * pulse)
         star.draw()
     
     # Draw corner decorations
@@ -456,8 +410,7 @@ def draw_decorative_elements():
     pulse = 0.8 + 0.2 * np.sin(star_time * 2)
     for sparkle in corner_sparkles:
         original_size = 8
-        sparkle.setSize(original_size * pulse)
-        sparkle.setOri(star_time * 45)
+        sparkle.setRadius(original_size * pulse)
         sparkle.draw()
 
 # Helper functions
@@ -482,7 +435,7 @@ def show_msg(win, text, wait_for_keypress=True):
     ]
     hearts = []
     for pos in heart_positions:
-        heart = visual.TextStim(win, text="💖", pos=pos, height=30, color='hotpink')
+        heart = visual.TextStim(win, text="<3", pos=pos, height=30, color='hotpink')
         hearts.append(heart)
     
     clear_screen(win)
@@ -576,9 +529,13 @@ task_msg += 'F = Face, L = Limbs, H = House, C = Car\n\n'
 task_msg += 'EYE TRACKING:\n'
 task_msg += '• Red/yellow dot shows where you are looking\n'
 task_msg += '• Your eye movements will be recorded\n\n'
-task_msg += 'Controls: SPACE=recalibrate, ESCAPE=quit\n\n'
+task_msg += 'CALIBRATION INSTRUCTIONS:\n'
+task_msg += '• Follow the dots with your eyes (not your head)\n'
+task_msg += '• Press SPACE to accept calibration\n'
+task_msg += '• Press ESCAPE when calibration is done\n'
+task_msg += '• Controls: SPACE=recalibrate, ESCAPE=quit\n\n'
 if dummy_mode:
-    task_msg += '⚠️  DUMMY MODE: Simulated eye tracking\n'
+    task_msg += 'DUMMY MODE: Simulated eye tracking\n'
 task_msg += 'Press ENTER to begin calibration'
 
 show_msg(win, task_msg)
@@ -596,11 +553,26 @@ if not dummy_mode:
         # Ensure we're out of calibration mode
         el_tracker.exitCalibration()
         el_tracker.setOfflineMode()
-        pylink.msecDelay(200)
+        pylink.msecDelay(500)  # Longer delay
+        
+        # Force window focus back to experiment
+        win.winHandle.activate()
+        win.flip()
+        
+        # Clear any pending events
+        event.clearEvents()
+        
+        print("✓ Returning to experiment window...")
         
     except RuntimeError as err:
         print('Calibration ERROR:', err)
         el_tracker.exitCalibration()
+        # Still try to return to experiment
+        win.winHandle.activate()
+        win.flip()
+
+# Post-calibration message
+show_msg(win, "Calibration complete!\n\nReady to start the memory grid experiment.\n\nPress any key to begin the first round.")
 
 # Memory Grid Experiment with Eye Tracking
 try:
@@ -706,11 +678,11 @@ try:
                         lineWidth=3
                     )
                     
-                    # Category icon/text
-                    icon_map = {'face': '😊', 'limbs': '✋', 'house': '🏠', 'car': '🚗'}
+                    # Category icon/text - REMOVE EMOJI
+                    icon_map = {'face': 'FACE', 'limbs': 'LIMB', 'house': 'HOUSE', 'car': 'CAR'}
                     placeholder_icon = visual.TextStim(
                         win,
-                        text=icon_map.get(category, '❓'),
+                        text=icon_map.get(category, '?'),
                         pos=pos,
                         height=image_size//3,
                         color='white'
@@ -780,7 +752,7 @@ try:
                 valid_rate = 100 * gaze_stats['valid_gaze_data'] / max(1, gaze_stats['total_attempts'])
                 
                 status_background.draw()
-                status_text.setText(f"✨ ROUND {round_num}/{TOTAL_ROUNDS} - STUDY THE IMAGES ✨\n🕐 Time left: {time_left:.1f}s  👁️ Gaze tracking: {valid_rate:.0f}% valid")
+                status_text.setText(f"ROUND {round_num}/{TOTAL_ROUNDS} - STUDY THE IMAGES\nTime left: {time_left:.1f}s | Gaze tracking: {valid_rate:.0f}% valid")
                 status_text.draw()
                 
                 win.flip()
@@ -868,7 +840,7 @@ try:
             
             question_text = visual.TextStim(
                 win,
-                text="✨ What type of image was here? ✨\n\n🎭 F = Face  ✋ L = Limbs  🏠 H = House  🚗 C = Car",
+                text="What type of image was here?\n\nF = Face  |  L = Limbs  |  H = House  |  C = Car",
                 pos=(0, scn_height//2 - 120),
                 height=18,
                 color='white',

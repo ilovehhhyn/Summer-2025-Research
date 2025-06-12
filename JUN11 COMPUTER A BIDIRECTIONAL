@@ -1,0 +1,1188 @@
+#!/usr/bin/env python3
+"""
+Computer A - Memory Grid Experiment with Cross-Computer Gaze Display
+Server version - displays Computer B's gaze as a blue dot
+Based on original memory grid code with networking functionality added
+"""
+
+import pylink
+import os
+import platform
+import random
+import time
+import sys
+import socket
+import threading
+import json
+import numpy as np
+from psychopy import visual, core, event, monitors, gui
+from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+from PIL import Image
+from string import ascii_letters, digits
+
+# Global variables
+el_tracker = None
+win = None
+server_socket = None
+connection_socket = None
+
+# Remote gaze display variables
+remote_gaze_marker = None
+remote_gaze_x = 0
+remote_gaze_y = 0
+gaze_data_lock = threading.Lock()
+last_remote_gaze_update = 0
+
+# Switch to the script folder
+script_path = os.path.dirname(sys.argv[0])
+if len(script_path) != 0:
+    os.chdir(script_path)
+
+# Show only critical log message in the PsychoPy console
+from psychopy import logging
+logging.console.setLevel(logging.CRITICAL)
+
+# Configuration variables
+use_retina = False
+dummy_mode = False
+full_screen = True
+
+# Memory Grid Experiment Parameters
+GRID_SIZE = 6
+TOTAL_ROUNDS = 10
+DISPLAY_TIME = 10.0
+CATEGORIES = ['face', 'limbs', 'house', 'car']
+IMAGES_PER_CATEGORY = 9
+
+# Response keys for each category
+RESPONSE_KEYS = {
+    'f': 'face',
+    'l': 'limbs', 
+    'h': 'house',
+    'c': 'car'
+}
+
+print("=" * 60)
+print("COMPUTER A (SERVER) - MEMORY GRID WITH CROSS-COMPUTER GAZE DISPLAY")
+print("=" * 60)
+
+def setup_server():
+    """Set up server to accept Computer B's connection"""
+    global server_socket, connection_socket
+    
+    try:
+        print(f"Setting up server on 100.1.1.10:5555...")
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            server_socket.bind(('100.1.1.10', 5555))
+        except OSError as e:
+            print(f"Cannot bind to 100.1.1.10:5555 - {e}")
+            print("Trying to bind to all interfaces (0.0.0.0)...")
+            server_socket.close()
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind(('0.0.0.0', 5555))
+            print("Bound to 0.0.0.0:5555 (all interfaces)")
+        
+        server_socket.listen(1)
+        server_socket.settimeout(60.0)
+        
+        print(f"✓ Server listening on port 5555")
+        print("=" * 50)
+        print("WAITING FOR COMPUTER B TO CONNECT...")
+        print("Please start Computer B now.")
+        print("=" * 50)
+        
+        try:
+            connection_socket, client_address = server_socket.accept()
+            connection_socket.settimeout(None)
+            print(f"✓ Computer B connected from {client_address}")
+            return True, client_address[0]
+        except socket.timeout:
+            print("Timeout waiting for Computer B connection")
+            return False, None
+        
+    except Exception as e:
+        print(f"Server setup error: {e}")
+        if server_socket:
+            try:
+                server_socket.close()
+            except:
+                pass
+        return False, None
+
+def receive_remote_gaze_data():
+    """Receive Computer B's gaze data and update display"""
+    global connection_socket, remote_gaze_marker, win, remote_gaze_x, remote_gaze_y, gaze_data_lock, last_remote_gaze_update
+    
+    if connection_socket is None:
+        print("No connection for receiving gaze data")
+        return
+        
+    data_buffer = ""
+    print("Starting to receive Computer B's gaze data...")
+    
+    while True:
+        try:
+            data = connection_socket.recv(1024).decode('utf-8')
+            if not data:
+                print("Computer B disconnected")
+                break
+                
+            data_buffer += data
+            
+            if '\n' in data_buffer:
+                lines = data_buffer.split('\n')
+                
+                for i in range(len(lines) - 1):
+                    try:
+                        gaze_json = json.loads(lines[i])
+                        
+                        if 'gaze_x' in gaze_json and 'gaze_y' in gaze_json:
+                            raw_x = gaze_json['gaze_x']
+                            raw_y = gaze_json['gaze_y']
+                            
+                            if win:
+                                converted_x = raw_x - (win.size[0] / 2)
+                                converted_y = (win.size[1] / 2) - raw_y
+                                
+                                with gaze_data_lock:
+                                    remote_gaze_x = converted_x
+                                    remote_gaze_y = converted_y
+                                    last_remote_gaze_update = time.time()
+                                    
+                    except (json.JSONDecodeError, KeyError) as e:
+                        continue
+                
+                data_buffer = lines[-1]
+                
+        except Exception as e:
+            print(f"Receive error: {e}")
+            break
+
+def send_our_gaze_data():
+    """Send our gaze data to Computer B"""
+    global connection_socket, el_tracker
+    
+    if connection_socket is None:
+        print("No connection for sending gaze data")
+        return
+    
+    print("Starting gaze data sender thread...")
+        
+    while True:
+        try:
+            if el_tracker and el_tracker.isRecording():
+                try:
+                    sample = el_tracker.getNewestSample()
+                    if sample is not None:
+                        gaze_data = None
+                        
+                        if sample.isRightSample():
+                            gaze_data = sample.getRightEye().getGaze()
+                        elif sample.isLeftSample():
+                            gaze_data = sample.getLeftEye().getGaze()
+                            
+                        if gaze_data and gaze_data[0] != pylink.MISSING_DATA and gaze_data[1] != pylink.MISSING_DATA:
+                            data_to_send = json.dumps({"gaze_x": gaze_data[0], "gaze_y": gaze_data[1]})
+                            connection_socket.sendall((data_to_send + '\n').encode())
+                except Exception as sample_error:
+                    pass
+                        
+            time.sleep(0.016)
+        except Exception as e:
+            print(f"Send error: {e}")
+            break
+
+def draw_remote_gaze_overlay():
+    """Draw Computer B's gaze marker (blue dot)"""
+    global remote_gaze_marker, win, connection_socket, gaze_data_lock, last_remote_gaze_update, remote_gaze_x, remote_gaze_y
+    
+    if remote_gaze_marker and win and connection_socket:
+        current_time = time.time()
+        
+        with gaze_data_lock:
+            time_since_update = current_time - last_remote_gaze_update
+            current_x = remote_gaze_x
+            current_y = remote_gaze_y
+        
+        if time_since_update < 1.0:
+            try:
+                remote_gaze_marker.setPos([current_x, current_y])
+                
+                if time_since_update < 0.1:
+                    remote_gaze_marker.setFillColor('blue')
+                    remote_gaze_marker.setOpacity(1.0)
+                elif time_since_update < 0.5:
+                    remote_gaze_marker.setFillColor('cyan')
+                    remote_gaze_marker.setOpacity(0.8)
+                else:
+                    remote_gaze_marker.setFillColor('gray')
+                    remote_gaze_marker.setOpacity(0.5)
+                
+                remote_gaze_marker.draw()
+            except Exception as e:
+                pass
+
+# Set up networking first
+print("\n1. SETTING UP NETWORKING (SERVER MODE)")
+print("-" * 40)
+connection_success, computer_b_ip = setup_server()
+
+# Set up EDF data file name
+edf_fname = 'COMP_A_SERVER'
+
+dlg_title = 'Computer A (Server) - Enter EDF File Name'
+dlg_prompt = 'Please enter a file name with 8 or fewer characters\n[letters, numbers, and underscore].'
+
+while True:
+    dlg = gui.Dlg(dlg_title)
+    dlg.addText(dlg_prompt)
+    dlg.addField('File Name:', edf_fname)
+    ok_data = dlg.show()
+    if dlg.OK:
+        print('EDF data filename: {}'.format(ok_data[0]))
+    else:
+        print('user cancelled')
+        core.quit()
+        sys.exit()
+
+    tmp_str = dlg.data[0]
+    edf_fname = tmp_str.rstrip().split('.')[0]
+
+    allowed_char = ascii_letters + digits + '_'
+    if not all([c in allowed_char for c in edf_fname]):
+        print('ERROR: Invalid EDF filename')
+    elif len(edf_fname) > 8:
+        print('ERROR: EDF filename should not exceed 8 characters')
+    else:
+        break
+
+# Set up folders
+results_folder = 'results'
+if not os.path.exists(results_folder):
+    os.makedirs(results_folder)
+
+time_str = time.strftime("_%Y_%m_%d_%H_%M", time.localtime())
+session_identifier = edf_fname + time_str
+session_folder = os.path.join(results_folder, session_identifier)
+if not os.path.exists(session_folder):
+    os.makedirs(session_folder)
+
+# Connect to EyeLink
+print("\n2. CONNECTING TO EYELINK")
+print("-" * 30)
+if dummy_mode:
+    el_tracker = pylink.EyeLink(None)
+    print("Running in DUMMY mode")
+else:
+    try:
+        el_tracker = pylink.EyeLink("100.1.1.1")
+        print("✓ Connected to EyeLink Host at 100.1.1.1")
+        
+        if el_tracker.isConnected():
+            try:
+                version = el_tracker.getTrackerVersionString()
+                print(f"✓ Tracker version: {version}")
+            except:
+                print("⚠️  Could not get version string")
+    except RuntimeError as error:
+        print('ERROR:', error)
+        print('Switching to dummy mode...')
+        dummy_mode = True
+        el_tracker = pylink.EyeLink(None)
+
+# Open EDF file
+edf_file = edf_fname + ".EDF"
+try:
+    el_tracker.openDataFile(edf_file)
+    print(f"✓ Data file opened: {edf_file}")
+except RuntimeError as err:
+    print('ERROR:', err)
+    if el_tracker.isConnected():
+        el_tracker.close()
+    core.quit()
+    sys.exit()
+
+# Configure tracker
+print("\n3. CONFIGURING TRACKER")
+print("-" * 25)
+el_tracker.setOfflineMode()
+pylink.msecDelay(100)
+
+# Enhanced configuration for maximum data
+commands = [
+    "clear_screen 0",
+    "sample_rate 1000",
+    "link_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT",
+    "link_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
+    "file_sample_data = LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT", 
+    "file_event_filter = LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT",
+    "recording_parse_type = GAZE",
+    "saccade_velocity_threshold = 30",
+    "saccade_acceleration_threshold = 9500",
+    "calibration_type = HV9"
+]
+
+for cmd in commands:
+    el_tracker.sendCommand(cmd)
+    pylink.msecDelay(10)
+
+print("✓ Tracker configured for recording with real-time display")
+
+# Set up LARGE graphics display
+print("\n4. SETTING UP LARGE DISPLAY")
+print("-" * 32)
+mon = monitors.Monitor('myMonitor', width=53.0, distance=70.0)
+win = visual.Window(fullscr=full_screen, monitor=mon, winType='pyglet', units='pix', color=[0, 0, 0])
+
+scn_width, scn_height = win.size
+print(f"✓ Large Window: {scn_width} x {scn_height}")
+
+if 'Darwin' in platform.system() and use_retina:
+    scn_width = int(scn_width/2.0)
+    scn_height = int(scn_height/2.0)
+
+# Configure EyeLink graphics
+el_coords = "screen_pixel_coords = 0 0 %d %d" % (scn_width - 1, scn_height - 1)
+el_tracker.sendCommand(el_coords)
+print(f"✓ Screen coordinates: {el_coords}")
+
+genv = EyeLinkCoreGraphicsPsychoPy(el_tracker, win)
+foreground_color = (-1, -1, -1)
+background_color = win.color
+genv.setCalibrationColors(foreground_color, background_color)
+
+# Set up calibration target
+if os.path.exists('images/fixTarget.bmp'):
+    genv.setTargetType('picture')
+    genv.setPictureTarget(os.path.join('images', 'fixTarget.bmp'))
+
+genv.setCalibrationSounds('', '', '')
+
+if use_retina:
+    genv.fixMacRetinaDisplay()
+
+pylink.openGraphicsEx(genv)
+print("✓ Graphics environment ready")
+
+# Memory Grid Functions
+def get_images_from_folders():
+    """Load all images from category folders"""
+    image_dict = {}
+    
+    for category in CATEGORIES:
+        folder_path = category  # Assumes folders are in same directory as script
+        if os.path.exists(folder_path):
+            image_files = [f for f in os.listdir(folder_path) 
+                          if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+            image_dict[category] = [os.path.join(folder_path, img) for img in image_files]
+        else:
+            print(f"Warning: Folder '{category}' not found. Using placeholder.")
+            image_dict[category] = [f"placeholder_{category}_{i}.png" for i in range(20)]
+    
+    return image_dict
+
+def create_grid_positions(grid_size, image_size, spacing):
+    """Create positions for a grid layout"""
+    positions = []
+    start_x = -(grid_size-1) * spacing / 2
+    start_y = (grid_size-1) * spacing / 2
+    
+    for row in range(grid_size):
+        for col in range(grid_size):
+            x = start_x + col * spacing
+            y = start_y - row * spacing
+            positions.append((x, y))
+    
+    return positions
+
+def select_images_for_round(image_dict):
+    """Select and randomize images for one round"""
+    selected_images = []
+    image_categories = []
+    
+    # Select 9 images from each category
+    for category in CATEGORIES:
+        available_images = image_dict[category]
+        if len(available_images) >= IMAGES_PER_CATEGORY:
+            selected = random.sample(available_images, IMAGES_PER_CATEGORY)
+        else:
+            # If not enough images, repeat some
+            selected = (available_images * ((IMAGES_PER_CATEGORY // len(available_images)) + 1))[:IMAGES_PER_CATEGORY]
+        
+        selected_images.extend(selected)
+        image_categories.extend([category] * IMAGES_PER_CATEGORY)
+    
+    # Randomize the order
+    combined = list(zip(selected_images, image_categories))
+    random.shuffle(combined)
+    selected_images, image_categories = zip(*combined)
+    
+    return list(selected_images), list(image_categories)
+
+# Create visual elements
+print("\n5. CREATING PRETTY VISUAL ELEMENTS")
+print("-" * 35)
+
+# Computer B's gaze marker (blue) - no local gaze display
+remote_gaze_marker = visual.Circle(win=win, radius=18, fillColor='blue', lineColor='gold', lineWidth=4)
+gaze_sparkle1 = visual.Circle(win=win, radius=8, fillColor='white', lineColor='lightblue', lineWidth=2)
+gaze_sparkle2 = visual.Circle(win=win, radius=4, fillColor='lightcyan', lineColor='white', lineWidth=1)
+
+# Cute corner decorations with pastel colors
+corner_size = 35
+corners = []
+corner_sparkles = []
+corner_positions = [
+    (-scn_width//2 + corner_size, scn_height//2 - corner_size),  # Top-left
+    (scn_width//2 - corner_size, scn_height//2 - corner_size),   # Top-right
+    (-scn_width//2 + corner_size, -scn_height//2 + corner_size), # Bottom-left
+    (scn_width//2 - corner_size, -scn_height//2 + corner_size)   # Bottom-right
+]
+
+pastel_colors = ['lightpink', 'lightblue', 'lightgreen', 'lightyellow']
+for i, pos in enumerate(corner_positions):
+    corner = visual.Circle(win=win, radius=20, fillColor=pastel_colors[i], lineColor='white', lineWidth=3, pos=pos)
+    corners.append(corner)
+    
+    sparkle_pos = (pos[0] + 25, pos[1] - 25)
+    sparkle = visual.Circle(win=win, radius=8, fillColor='white', lineColor='gold', 
+                          lineWidth=2, pos=sparkle_pos)
+    corner_sparkles.append(sparkle)
+
+# Beautiful status display
+status_background = visual.Rect(win=win, width=scn_width*0.8, height=80, 
+                               fillColor='navy', lineColor='lightblue', lineWidth=3,
+                               pos=[0, scn_height//2 - 60])
+status_text = visual.TextStim(win, text='', pos=[0, scn_height//2 - 60], color='lightcyan', 
+                             height=18, bold=True)
+
+# Decorative border elements
+border_stars = []
+for i in range(12):  # Stars around the border
+    angle = i * 30  # Every 30 degrees
+    x = (scn_width//2 - 80) * np.cos(np.radians(angle))
+    y = (scn_height//2 - 80) * np.sin(np.radians(angle))
+    star = visual.Circle(win=win, radius=12, fillColor='gold', lineColor='white',
+                        lineWidth=2, pos=[x, y])
+    border_stars.append(star)
+
+# Title decoration
+title_background = visual.Rect(win=win, width=600, height=60, fillColor='mediumpurple', 
+                              lineColor='white', lineWidth=4, pos=[0, scn_height//2 - 120])
+title_sparkle_left = visual.Circle(win=win, radius=15, fillColor='white', 
+                                 lineColor='gold', lineWidth=2, pos=[-320, scn_height//2 - 120])
+title_sparkle_right = visual.Circle(win=win, radius=15, fillColor='white', 
+                                  lineColor='gold', lineWidth=2, pos=[320, scn_height//2 - 120])
+
+# Gaze statistics
+gaze_stats = {
+    'total_attempts': 0,
+    'samples_received': 0,
+    'left_eye_samples': 0,
+    'right_eye_samples': 0,
+    'valid_gaze_data': 0,
+    'missing_data': 0,
+    'last_valid_gaze': None,
+    'coordinate_issues': 0
+}
+
+print(f"✓ Visual elements created - Screen: {scn_width}x{scn_height}")
+
+# Enhanced gaze tracking function (for sending our gaze data only - no local display)
+def update_gaze_tracking_for_sending():
+    """Track our gaze for sending to Computer B, but don't display locally"""
+    global gaze_stats
+    
+    gaze_stats['total_attempts'] += 1
+    
+    # Get newest sample
+    sample = None
+    try:
+        sample = el_tracker.getNewestSample()
+    except Exception as e:
+        if gaze_stats['total_attempts'] % 1000 == 0:  # Less frequent error reporting
+            print(f"Sample retrieval error: {e}")
+    
+    if sample is not None:
+        gaze_stats['samples_received'] += 1
+        
+        # Check eye availability
+        left_available = sample.isLeftSample()
+        right_available = sample.isRightSample()
+        
+        gaze_data = None
+        
+        # Try RIGHT EYE first
+        if right_available:
+            gaze_stats['right_eye_samples'] += 1
+            try:
+                gaze_data = sample.getRightEye().getGaze()
+            except:
+                pass
+        
+        # Try LEFT EYE if right not available
+        elif left_available:
+            gaze_stats['left_eye_samples'] += 1
+            try:
+                gaze_data = sample.getLeftEye().getGaze()
+            except:
+                pass
+        
+        # Process gaze data for statistics only
+        if gaze_data:
+            # Check if gaze data is valid (not missing)
+            if gaze_data[0] != pylink.MISSING_DATA and gaze_data[1] != pylink.MISSING_DATA:
+                gaze_stats['valid_gaze_data'] += 1
+                gaze_stats['last_valid_gaze'] = gaze_data
+                
+                # Check if coordinates are reasonable
+                try:
+                    gaze_x = gaze_data[0] - win.size[0]/2
+                    gaze_y = win.size[1]/2 - gaze_data[1]
+                    
+                    if not (abs(gaze_x) <= win.size[0] and abs(gaze_y) <= win.size[1]):
+                        gaze_stats['coordinate_issues'] += 1
+                        
+                except Exception as e:
+                    pass
+            else:
+                gaze_stats['missing_data'] += 1
+
+def draw_decorative_elements():
+    """Draw all the pretty decorative elements"""
+    # Draw border stars with gentle rotation
+    star_time = core.getTime()
+    for i, star in enumerate(border_stars):
+        # Create a gentle pulsing effect instead of rotation for circles
+        pulse = 0.8 + 0.2 * np.sin(star_time * 2 + i * 0.5)
+        star.setRadius(12 * pulse)
+        star.draw()
+    
+    # Draw corner decorations
+    for corner in corners:
+        corner.draw()
+    
+    # Draw corner sparkles with gentle pulsing
+    pulse = 0.8 + 0.2 * np.sin(star_time * 2)
+    for sparkle in corner_sparkles:
+        original_size = 8
+        sparkle.setRadius(original_size * pulse)
+        sparkle.draw()
+
+# Helper functions
+def clear_screen(win):
+    win.clearBuffer()
+    win.flip()
+
+def show_msg(win, text, wait_for_keypress=True):
+    # Create beautiful message display
+    msg_background = visual.Rect(win, width=scn_width*0.7, height=scn_height*0.6, 
+                                fillColor='lavender', lineColor='mediumpurple', lineWidth=5)
+    msg_border = visual.Rect(win, width=scn_width*0.72, height=scn_height*0.62, 
+                            fillColor=None, lineColor='gold', lineWidth=3)
+    
+    msg = visual.TextStim(win, text, color='darkslateblue', wrapWidth=scn_width*0.6, 
+                         height=22, bold=True)
+    
+    # Decorative hearts around the message
+    heart_positions = [
+        (-scn_width*0.3, scn_height*0.25), (scn_width*0.3, scn_height*0.25),
+        (-scn_width*0.3, -scn_height*0.25), (scn_width*0.3, -scn_height*0.25)
+    ]
+    hearts = []
+    for pos in heart_positions:
+        heart = visual.TextStim(win, text="<3", pos=pos, height=30, color='hotpink')
+        hearts.append(heart)
+    
+    clear_screen(win)
+    
+    # Draw with animation
+    if wait_for_keypress:
+        start_time = core.getTime()
+        while True:
+            current_time = core.getTime()
+            
+            # Gentle pulsing effect
+            pulse = 0.95 + 0.05 * np.sin((current_time - start_time) * 3)
+            msg_background.setSize([scn_width*0.7*pulse, scn_height*0.6*pulse])
+            
+            win.clearBuffer()
+            draw_decorative_elements()
+            msg_border.draw()
+            msg_background.draw()
+            msg.draw()
+            
+            # Animated hearts
+            heart_pulse = 0.8 + 0.2 * np.sin((current_time - start_time) * 4)
+            for i, heart in enumerate(hearts):
+                heart.setHeight(30 * heart_pulse)
+                heart.draw()
+            
+            win.flip()
+            core.wait(0.016)  # 60 FPS
+            
+            keys = event.getKeys()
+            if keys:
+                break
+    else:
+        msg_border.draw()
+        msg_background.draw()
+        msg.draw()
+        for heart in hearts:
+            heart.draw()
+        win.flip()
+    
+    clear_screen(win)
+
+def terminate_task():
+    global el_tracker, connection_socket, server_socket
+    
+    print("\nCleaning up...")
+    if el_tracker and el_tracker.isConnected():
+        try:
+            if el_tracker.isRecording():
+                el_tracker.stopRecording()
+            el_tracker.setOfflineMode()
+            el_tracker.sendCommand('clear_screen 0')
+            pylink.msecDelay(500)
+            el_tracker.closeDataFile()
+            
+            # Download EDF file
+            local_edf = os.path.join(session_folder, session_identifier + '.EDF')
+            try:
+                el_tracker.receiveDataFile(edf_file, local_edf)
+                print(f"✓ Data file saved: {local_edf}")
+            except RuntimeError as error:
+                print('Data file download error:', error)
+            
+            el_tracker.close()
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+    
+    # Print final gaze statistics
+    if gaze_stats['total_attempts'] > 0:
+        valid_rate = 100 * gaze_stats['valid_gaze_data'] / gaze_stats['total_attempts']
+        print(f"\nFinal Gaze Statistics:")
+        print(f"  Valid gaze data: {gaze_stats['valid_gaze_data']}/{gaze_stats['total_attempts']} ({valid_rate:.1f}%)")
+        print(f"  Left eye samples: {gaze_stats['left_eye_samples']}")
+        print(f"  Right eye samples: {gaze_stats['right_eye_samples']}")
+        print(f"  Missing data: {gaze_stats['missing_data']}")
+        print(f"  Coordinate issues: {gaze_stats['coordinate_issues']}")
+    
+    # Close network connections
+    if connection_socket:
+        try:
+            connection_socket.close()
+        except:
+            pass
+    if server_socket:
+        try:
+            server_socket.close()
+        except:
+            pass
+    
+    win.close()
+    core.quit()
+    sys.exit()
+
+# Show instructions
+network_status = ""
+if connection_socket:
+    network_status += "✓ Connected for bidirectional gaze sharing with Computer B\n"
+else:
+    network_status += "✗ Not connected to Computer B\n"
+
+task_msg = f'Computer A (Server) - Memory Grid with Cross-Computer Gaze Display\n\n'
+task_msg += f'NETWORK STATUS:\n{network_status}\n'
+task_msg += 'TASK:\n'
+task_msg += '• Study a 6x6 grid of images for 10 seconds\n'
+task_msg += '• Images will be hidden with gray squares\n'
+task_msg += '• A question mark will appear over one square\n'
+task_msg += '• Recall what type of image was there\n\n'
+task_msg += 'RESPONSE KEYS:\n'
+task_msg += 'F = Face, L = Limbs, H = House, C = Car\n\n'
+task_msg += 'CROSS-COMPUTER GAZE TRACKING:\n'
+task_msg += '• Blue dot shows Computer B\'s gaze position\n'
+task_msg += '• Computer B sees your gaze as a red dot\n\n'
+task_msg += 'CALIBRATION INSTRUCTIONS:\n'
+task_msg += '• Follow the dots with your eyes (not your head)\n'
+task_msg += '• Press SPACE to accept calibration\n'
+task_msg += '• Press ESCAPE when calibration is done\n'
+task_msg += '• Controls: SPACE=recalibrate, ESCAPE=quit\n\n'
+if dummy_mode:
+    task_msg += 'DUMMY MODE: Simulated eye tracking\n'
+task_msg += 'Press ENTER to begin calibration'
+
+show_msg(win, task_msg)
+
+# Calibration - MOVED TO BEFORE NETWORKING
+print("\n6. CALIBRATION")
+print("-" * 15)
+if not dummy_mode:
+    try:
+        print("Starting calibration...")
+        print("IMPORTANT: After calibration/validation, press ESCAPE to return to experiment!")
+        el_tracker.doTrackerSetup()
+        print("✓ Calibration completed - make sure you pressed ESCAPE!")
+        
+        # Ensure we're out of calibration mode
+        el_tracker.exitCalibration()
+        el_tracker.setOfflineMode()
+        pylink.msecDelay(500)  # Longer delay
+        
+        # Force window focus back to experiment
+        win.winHandle.activate()
+        win.flip()
+        
+        # Clear any pending events
+        event.clearEvents()
+        
+        print("✓ Returning to experiment window...")
+        
+    except RuntimeError as err:
+        print('Calibration ERROR:', err)
+        el_tracker.exitCalibration()
+        # Still try to return to experiment
+        win.winHandle.activate()
+        win.flip()
+
+# Start networking threads AFTER calibration
+print("\n7. STARTING GAZE SHARING")
+print("-" * 30)
+
+if connection_success and connection_socket:
+    receive_thread = threading.Thread(target=receive_remote_gaze_data)
+    receive_thread.daemon = True
+    receive_thread.start()
+    print("✓ Started thread to receive Computer B's gaze data")
+    
+    send_thread = threading.Thread(target=send_our_gaze_data)
+    send_thread.daemon = True
+    send_thread.start()
+    print("✓ Started thread to send gaze data to Computer B")
+
+# Post-calibration message
+show_msg(win, "Calibration complete!\n\nReady to start the memory grid experiment.\n\nPress any key to begin the first round.")
+
+# Memory Grid Experiment with Eye Tracking and Cross-Computer Gaze Display
+try:
+    print("\n8. STARTING MEMORY GRID EXPERIMENT WITH CROSS-COMPUTER GAZE TRACKING")
+    print("-" * 70)
+    
+    # Start recording
+    recording_success = False
+    for attempt in range(3):
+        print(f"Recording attempt {attempt + 1}:")
+        
+        el_tracker.setOfflineMode()
+        pylink.msecDelay(100)
+        
+        error = el_tracker.startRecording(1, 1, 1, 1)
+        print(f"  startRecording() returned: {error}")
+        
+        if error == 0:
+            pylink.msecDelay(300)
+            
+            # Test for samples
+            for i in range(10):
+                sample = el_tracker.getNewestSample()
+                if sample is not None:
+                    print(f"  Got sample on test {i+1}")
+                    recording_success = True
+                    break
+                pylink.msecDelay(10)
+            
+            if recording_success:
+                break
+        else:
+            print(f"  Recording start failed with error: {error}")
+    
+    if recording_success:
+        el_tracker.sendMessage("MEMORY_GRID_EXPERIMENT_START")
+        print("✓ Recording active - starting memory grid experiment")
+        
+        # Load images
+        image_dict = get_images_from_folders()
+        
+        # Grid parameters - scale for screen size
+        grid_scale = min(scn_width, scn_height) / 1000
+        image_size = int(80 * grid_scale)
+        spacing = int(120 * grid_scale)
+        grid_positions = create_grid_positions(GRID_SIZE, image_size, spacing)
+        
+        print(f"Grid setup: Scale {grid_scale:.2f}, Image size {image_size}, Spacing {spacing}")
+        
+        # Results storage
+        results = []
+        
+        # Main experiment loop
+        for round_num in range(1, TOTAL_ROUNDS + 1):
+            print(f"\nStarting round {round_num}")
+            el_tracker.sendMessage(f'ROUND_{round_num}_START')
+            
+            # Select images for this round
+            round_images, round_categories = select_images_for_round(image_dict)
+            
+            # Create beautiful image stimuli with frames
+            image_stimuli = []
+            image_frames = []
+            for i, (img_path, pos) in enumerate(zip(round_images, grid_positions)):
+                try:
+                    img_stim = visual.ImageStim(
+                        win,
+                        image=img_path,
+                        pos=pos,
+                        size=(image_size, image_size)
+                    )
+                    image_stimuli.append(img_stim)
+                    
+                    # Pretty frame around each image
+                    category = round_categories[i]
+                    frame_colors = {'face': 'lightpink', 'limbs': 'lightblue', 
+                                  'house': 'lightgreen', 'car': 'lightyellow'}
+                    frame = visual.Rect(
+                        win,
+                        width=image_size + 8,
+                        height=image_size + 8,
+                        pos=pos,
+                        fillColor=None,
+                        lineColor=frame_colors.get(category, 'white'),
+                        lineWidth=4
+                    )
+                    image_frames.append(frame)
+                    
+                except:
+                    # Create beautiful colored placeholder
+                    category = round_categories[i]
+                    color_map = {'face': 'lightpink', 'limbs': 'lightblue', 
+                               'house': 'lightgreen', 'car': 'lightyellow'}
+                    
+                    # Gradient-like background
+                    placeholder = visual.Rect(
+                        win,
+                        width=image_size,
+                        height=image_size,
+                        pos=pos,
+                        fillColor=color_map.get(category, 'lightgray'),
+                        lineColor='white',
+                        lineWidth=3
+                    )
+                    
+                    # Category icon/text
+                    icon_map = {'face': 'FACE', 'limbs': 'LIMB', 'house': 'HOUSE', 'car': 'CAR'}
+                    placeholder_icon = visual.TextStim(
+                        win,
+                        text=icon_map.get(category, '?'),
+                        pos=pos,
+                        height=image_size//3,
+                        color='white'
+                    )
+                    
+                    image_stimuli.append((placeholder, placeholder_icon))
+                    
+                    # Pretty frame for placeholder too
+                    frame = visual.Rect(
+                        win,
+                        width=image_size + 8,
+                        height=image_size + 8,
+                        pos=pos,
+                        fillColor=None,
+                        lineColor='gold',
+                        lineWidth=4
+                    )
+                    image_frames.append(frame)
+            
+            # Display images for 10 seconds with gaze tracking
+            el_tracker.sendMessage('IMAGES_DISPLAY_START')
+            start_time = core.getTime()
+            
+            while core.getTime() - start_time < DISPLAY_TIME:
+                # Update gaze tracking for sending (no local display)
+                update_gaze_tracking_for_sending()
+                
+                # Clear and draw
+                win.clearBuffer()
+                
+                # Draw beautiful background elements
+                draw_decorative_elements()
+                
+                # Draw title area
+                title_background.draw()
+                title_sparkle_left.draw()
+                title_sparkle_right.draw()
+                
+                # Draw image frames first (behind images)
+                for frame in image_frames:
+                    frame.draw()
+                
+                # Draw images with gentle hover effect
+                hover_time = core.getTime()
+                for i, stim in enumerate(image_stimuli):
+                    # Gentle floating animation
+                    float_offset = 2 * np.sin(hover_time * 2 + i * 0.5)
+                    original_pos = grid_positions[i]
+                    new_pos = (original_pos[0], original_pos[1] + float_offset)
+                    
+                    if isinstance(stim, tuple):  # Placeholder
+                        stim[0].setPos(new_pos)
+                        stim[0].draw()
+                        stim[1].setPos(new_pos)
+                        stim[1].draw()
+                    else:
+                        stim.setPos(new_pos)
+                        stim.draw()
+                
+                # Draw Computer B's gaze marker (blue) with sparkles
+                draw_remote_gaze_overlay()
+                
+                # Animate Computer B's gaze sparkles around their position
+                if remote_gaze_marker and connection_socket:
+                    current_time = core.getTime()
+                    with gaze_data_lock:
+                        time_since_update = current_time - last_remote_gaze_update
+                        current_x = remote_gaze_x
+                        current_y = remote_gaze_y
+                    
+                    if time_since_update < 1.0:
+                        sparkle_time = core.getTime()
+                        sparkle_offset1 = 25 * np.sin(sparkle_time * 3)
+                        sparkle_offset2 = 20 * np.cos(sparkle_time * 4)
+                        
+                        gaze_sparkle1.setPos([current_x + sparkle_offset1, current_y + sparkle_offset2])
+                        gaze_sparkle2.setPos([current_x - sparkle_offset2, current_y - sparkle_offset1])
+                        gaze_sparkle1.draw()
+                        gaze_sparkle2.draw()
+                
+                # Show pretty status with background
+                time_left = DISPLAY_TIME - (core.getTime() - start_time)
+                valid_rate = 100 * gaze_stats['valid_gaze_data'] / max(1, gaze_stats['total_attempts'])
+                
+                status_background.draw()
+                status_text.setText(f"ROUND {round_num}/{TOTAL_ROUNDS} - STUDY THE IMAGES\nTime left: {time_left:.1f}s | Blue dot shows Computer B's gaze ({valid_rate:.0f}% valid)")
+                status_text.draw()
+                
+                win.flip()
+                core.wait(0.008)  # ~120Hz refresh
+                
+                # Check for quit/recalibrate
+                keys = event.getKeys()
+                if 'escape' in keys:
+                    raise KeyboardInterrupt
+                elif 'space' in keys:
+                    print("Recalibrating...")
+                    try:
+                        el_tracker.doTrackerSetup()
+                        el_tracker.exitCalibration()
+                        pylink.msecDelay(200)
+                        if not el_tracker.isRecording():
+                            el_tracker.startRecording(1, 1, 1, 1)
+                            pylink.msecDelay(500)
+                    except Exception as e:
+                        print(f"Recalibration error: {e}")
+            
+            el_tracker.sendMessage('IMAGES_DISPLAY_END')
+            
+            # Create beautiful gray squares with soft shadows
+            gray_squares = []
+            square_shadows = []
+            for pos in grid_positions:
+                # Shadow effect
+                shadow = visual.Rect(
+                    win,
+                    width=image_size + 4,
+                    height=image_size + 4,
+                    pos=(pos[0] + 3, pos[1] - 3),
+                    fillColor='gray',
+                    lineColor=None
+                )
+                square_shadows.append(shadow)
+                
+                # Main gray square
+                gray_square = visual.Rect(
+                    win,
+                    width=image_size,
+                    height=image_size,
+                    pos=pos,
+                    fillColor='lightgray',
+                    lineColor='white',
+                    lineWidth=3
+                )
+                gray_squares.append(gray_square)
+            
+            # Choose random target
+            target_index = random.randint(0, 35)
+            target_position = grid_positions[target_index]
+            correct_category = round_categories[target_index]
+            
+            # Beautiful question mark with glow effect
+            question_glow = visual.Circle(
+                win,
+                radius=int(40 * grid_scale),
+                pos=target_position,
+                fillColor='gold',
+                lineColor='white',
+                lineWidth=3
+            )
+            
+            question_mark = visual.TextStim(
+                win,
+                text="?",
+                pos=target_position,
+                height=int(35 * grid_scale),
+                color='darkred',
+                bold=True
+            )
+            
+            # Beautiful response instructions with decorative background
+            instruction_bg = visual.Rect(
+                win,
+                width=scn_width*0.6,
+                height=120,
+                pos=(0, scn_height//2 - 120),
+                fillColor='mediumpurple',
+                lineColor='white',
+                lineWidth=4
+            )
+            
+            question_text = visual.TextStim(
+                win,
+                text="What type of image was here?\n\nF = Face  |  L = Limbs  |  H = House  |  C = Car",
+                pos=(0, scn_height//2 - 120),
+                height=18,
+                color='white',
+                bold=True
+            )
+            
+            # Display question with beautiful animations
+            el_tracker.sendMessage(f'QUESTION_START target_pos_{target_index} correct_{correct_category}')
+            
+            # Animated question display
+            question_start_time = core.getTime()
+            win.clearBuffer()
+            
+            # Draw with pulsing question mark
+            pulse_time = core.getTime()
+            question_pulse = 0.8 + 0.2 * np.sin((pulse_time - question_start_time) * 4)
+            
+            # Draw shadows first
+            for shadow in square_shadows:
+                shadow.draw()
+                
+            # Draw gray squares
+            for square in gray_squares:
+                square.draw()
+                
+            # Draw decorative elements
+            draw_decorative_elements()
+            
+            # Draw instruction background
+            instruction_bg.draw()
+            question_text.draw()
+            
+            # Draw pulsing question mark with glow
+            question_glow.setRadius(int(40 * grid_scale * question_pulse))
+            question_glow.draw()
+            question_mark.setHeight(int(35 * grid_scale * question_pulse))
+            question_mark.draw()
+            
+            # Draw Computer B's gaze marker during question phase
+            draw_remote_gaze_overlay()
+            
+            win.flip()
+            
+            # Wait for response
+            response_time = core.getTime()
+            keys = event.waitKeys(keyList=list(RESPONSE_KEYS.keys()) + ['escape'])
+            reaction_time = core.getTime() - response_time
+            
+            if 'escape' in keys:
+                break
+            
+            # Process response
+            response_key = keys[0]
+            response_category = RESPONSE_KEYS[response_key]
+            correct = response_category == correct_category
+            
+            el_tracker.sendMessage(f'RESPONSE_{response_key} correct_{correct} rt_{reaction_time:.3f}')
+            
+            # Store results
+            results.append({
+                'round': round_num,
+                'target_position': target_index,
+                'correct_category': correct_category,
+                'response_category': response_category,
+                'correct': correct,
+                'reaction_time': reaction_time
+            })
+            
+            # Brief feedback with gaze tracking
+            feedback_color = 'green' if correct else 'red'
+            feedback_text = 'Correct!' if correct else f'Incorrect. It was {correct_category}'
+            
+            feedback = visual.TextStim(
+                win,
+                text=feedback_text,
+                pos=(0, -scn_height//3),
+                height=25,
+                color=feedback_color
+            )
+            
+            start_time = core.getTime()
+            while core.getTime() - start_time < 1.5:
+                update_gaze_tracking_for_sending()
+                
+                win.clearBuffer()
+                for square in gray_squares:
+                    square.draw()
+                for corner in corners:
+                    corner.draw()
+                feedback.draw()
+                draw_remote_gaze_overlay()
+                win.flip()
+                core.wait(0.008)
+            
+            el_tracker.sendMessage(f'ROUND_{round_num}_END')
+            print(f"Round {round_num}: {correct_category} -> {response_category}, correct: {correct}")
+        
+        # Stop recording
+        el_tracker.stopRecording()
+        el_tracker.sendMessage("MEMORY_GRID_EXPERIMENT_END")
+        print("✓ Memory grid experiment completed successfully")
+        
+        # Show final results
+        if results:
+            correct_count = sum(1 for r in results if r['correct'])
+            valid_rate = 100 * gaze_stats['valid_gaze_data'] / max(1, gaze_stats['total_attempts'])
+            
+            completion_msg = f'Computer A (Server) - Memory Grid Complete!\n\n'
+            completion_msg += f'Performance:\n'
+            completion_msg += f'• Accuracy: {correct_count}/{len(results)} correct ({correct_count/len(results)*100:.1f}%)\n'
+            completion_msg += f'• Average RT: {sum(r["reaction_time"] for r in results)/len(results):.2f}s\n\n'
+            completion_msg += f'Eye Tracking:\n'
+            completion_msg += f'• Valid gaze data: {valid_rate:.1f}%\n'
+            completion_msg += f'• Total samples: {gaze_stats["samples_received"]}\n\n'
+            completion_msg += f'Cross-Computer Gaze Tracking:\n'
+            completion_msg += f'• Blue dot showed Computer B\'s gaze position\n'
+            completion_msg += f'• Computer B saw your gaze as a red dot\n\n'
+            completion_msg += f'Data saved to EDF file for analysis\n\n'
+            completion_msg += f'Press any key to exit'
+            
+            show_msg(win, completion_msg)
+        
+    else:
+        print("✗ Failed to establish eye tracking")
+        show_msg(win, "Could not establish eye tracking\nPress any key to exit")
+
+except KeyboardInterrupt:
+    print("Experiment interrupted by user")
+except Exception as e:
+    print(f"Experiment error: {e}")
+    import traceback
+    traceback.print_exc()
+
+finally:
+    terminate_task()

@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+Standalone Network Test - Computer B (Client)
+Tests JSON sending/receiving between two computers  
+Run Computer A test first, then run this on Computer B
+"""
+
+import socket
+import threading
+import json
+import time
+import math
+
+# Global variables
+client_socket = None
+remote_gaze_x = 0
+remote_gaze_y = 0
+last_update = 0
+
+def setup_client():
+    """Set up client to connect to Computer A"""
+    global client_socket
+    
+    try:
+        print("Setting up client to connect to Computer A at 100.1.1.10:5555...")
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.settimeout(60.0)
+        
+        print("CONNECTING TO COMPUTER A...")
+        client_socket.connect(('100.1.1.10', 5555))
+        client_socket.settimeout(None)
+        print("✓ Connected to Computer A")
+        return True
+        
+    except Exception as e:
+        print(f"Client setup error: {e}")
+        return False
+
+def receive_test_data():
+    """Receive test data from Computer A"""
+    global client_socket, remote_gaze_x, remote_gaze_y, last_update
+    
+    data_buffer = ""
+    received_count = 0
+    
+    print("Starting to receive test data from Computer A...")
+    
+    while True:
+        try:
+            data = client_socket.recv(1024).decode('utf-8')
+            if not data:
+                print("Computer A disconnected")
+                break
+                
+            data_buffer += data
+            print(f"Raw data received: {repr(data)}")
+            
+            while '\n' in data_buffer:
+                line, data_buffer = data_buffer.split('\n', 1)
+                
+                if line.strip():
+                    try:
+                        gaze_json = json.loads(line.strip())
+                        print(f"Parsed JSON: {gaze_json}")
+                        
+                        if 'gaze_x' in gaze_json and 'gaze_y' in gaze_json:
+                            raw_x = gaze_json['gaze_x']
+                            raw_y = gaze_json['gaze_y']
+                            
+                            # Simple coordinate conversion (assuming 2560x1440 screen)
+                            converted_x = raw_x - (2560 / 2)
+                            converted_y = (1440 / 2) - raw_y
+                            
+                            remote_gaze_x = converted_x
+                            remote_gaze_y = converted_y
+                            last_update = time.time()
+                            
+                            received_count += 1
+                            print(f"✓ Updated position #{received_count}: raw({raw_x}, {raw_y}) -> screen({converted_x}, {converted_y})")
+                            
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error: {e}, line: {repr(line)}")
+                
+        except Exception as e:
+            print(f"Receive error: {e}")
+            break
+
+def send_test_data():
+    """Send test data to Computer A"""
+    global client_socket
+    
+    print("Starting to send test data to Computer A...")
+    
+    # Send immediate test messages
+    test_messages = [
+        {"gaze_x": 640.0, "gaze_y": 360.0, "test": "B_message_1"},
+        {"gaze_x": 660.0, "gaze_y": 380.0, "test": "B_message_2"},
+        {"gaze_x": 680.0, "gaze_y": 400.0, "test": "B_message_3"},
+    ]
+    
+    for i, msg in enumerate(test_messages):
+        try:
+            json_str = json.dumps(msg) + '\n'
+            print(f"Sending test message {i+1}: {repr(json_str)}")
+            client_socket.sendall(json_str.encode())
+            print(f"✓ Test message {i+1} sent successfully")
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Error sending test message {i+1}: {e}")
+    
+    # Send continuous test data (simulating gaze movement)
+    sent_count = 0
+    while sent_count < 20:  # Send 20 messages then stop
+        try:
+            # Simulate gaze moving in a square pattern
+            phase = (sent_count % 16) / 4  # 4 phases, 4 steps each
+            if phase < 1:
+                x = 640 + phase * 200      # Move right
+                y = 360
+            elif phase < 2:
+                x = 840
+                y = 360 + (phase - 1) * 200  # Move down
+            elif phase < 3:
+                x = 840 - (phase - 2) * 200  # Move left
+                y = 560
+            else:
+                x = 640
+                y = 560 - (phase - 3) * 200  # Move up
+            
+            msg = {"gaze_x": x, "gaze_y": y, "count": sent_count}
+            json_str = json.dumps(msg) + '\n'
+            
+            client_socket.sendall(json_str.encode())
+            sent_count += 1
+            print(f"Sent continuous message #{sent_count}: gaze at ({x:.1f}, {y:.1f})")
+            
+            time.sleep(0.1)  # 10 Hz
+            
+        except Exception as e:
+            print(f"Error sending continuous data: {e}")
+            break
+    
+    print("Finished sending test data")
+
+def main():
+    print("=" * 60)
+    print("COMPUTER B - STANDALONE NETWORK TEST (CLIENT)")
+    print("=" * 60)
+    
+    # Set up client
+    if not setup_client():
+        print("Failed to connect to Computer A")
+        return
+    
+    # Start receiver thread
+    receive_thread = threading.Thread(target=receive_test_data)
+    receive_thread.daemon = True
+    receive_thread.start()
+    print("✓ Started receiver thread")
+    
+    # Start sender thread
+    send_thread = threading.Thread(target=send_test_data)
+    send_thread.daemon = True
+    send_thread.start()
+    print("✓ Started sender thread")
+    
+    # Monitor for 30 seconds
+    print("\nRunning test for 30 seconds...")
+    start_time = time.time()
+    
+    while time.time() - start_time < 30:
+        time.sleep(1)
+        elapsed = time.time() - start_time
+        time_since_update = time.time() - last_update if last_update > 0 else 999
+        print(f"Test running... {elapsed:.0f}s elapsed, last data: {time_since_update:.1f}s ago, position: ({remote_gaze_x:.1f}, {remote_gaze_y:.1f})")
+    
+    print("\nTest completed!")
+    
+    # Cleanup
+    if client_socket:
+        client_socket.close()
+
+if __name__ == "__main__":
+    main()
